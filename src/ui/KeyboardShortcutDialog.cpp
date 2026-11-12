@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "KeyboardShortcutDialog.h"
 #include <QBrush>
 #include <QColor>
@@ -18,10 +19,10 @@ QString keysText(const QList<QKeySequence>& keys){QStringList text;for(const aut
 }
 KeyboardShortcutDialog::KeyboardShortcutDialog(QWidget* parent,const CommandRegistry& registry,Commit commit)
     :QDialog(parent),defaults_(registry.defaultShortcuts()),draft_(registry.shortcuts()),commit_(std::move(commit)){
-    setObjectName("keyboardShortcutDialog");setWindowTitle("Keyboard Shortcuts");resize(640,640);
+    setObjectName("keyboardShortcutDialog");setWindowTitle(compositor::ui::localized("Keyboard Shortcuts"));resize(640,640);
     auto* layout=new QVBoxLayout(this);
-    search_=new QLineEdit;search_->setObjectName("shortcutSearch");search_->setPlaceholderText("Search commands");search_->setClearButtonEnabled(true);layout->addWidget(search_);
-    list_=new QTreeWidget;list_->setObjectName("shortcutList");list_->setColumnCount(3);list_->setHeaderLabels({"Command","Menu","Shortcut"});list_->setRootIsDecorated(false);list_->setAccessibleName("Commands and shortcuts");
+    search_=new QLineEdit;search_->setObjectName("shortcutSearch");search_->setPlaceholderText(compositor::ui::localized("Search commands"));search_->setClearButtonEnabled(true);layout->addWidget(search_);
+    list_=new QTreeWidget;list_->setObjectName("shortcutList");list_->setColumnCount(3);list_->setHeaderLabels({"Command","Menu","Shortcut"});list_->setRootIsDecorated(false);list_->setAccessibleName(compositor::ui::localized("Commands and shortcuts"));
     list_->header()->setSectionResizeMode(0,QHeaderView::Stretch);
     for(const auto& item:registry.listCommands()){
         if(!draft_.count(item.id))continue;
@@ -29,16 +30,16 @@ KeyboardShortcutDialog::KeyboardShortcutDialog(QWidget* parent,const CommandRegi
     }
     layout->addWidget(list_,1);
     auto* editor=new QHBoxLayout;
-    primary_=new QKeySequenceEdit;primary_->setObjectName("shortcutPrimary");primary_->setMaximumSequenceLength(1);primary_->setAccessibleName("Shortcut");
-    secondary_=new QKeySequenceEdit;secondary_->setObjectName("shortcutSecondary");secondary_->setMaximumSequenceLength(1);secondary_->setAccessibleName("Alternate shortcut");
-    clear_=new QPushButton("Clear");clear_->setObjectName("shortcutClear");
-    editor->addWidget(new QLabel("Shortcut"));editor->addWidget(primary_,1);editor->addWidget(new QLabel("Alternate"));editor->addWidget(secondary_,1);editor->addWidget(clear_);
+    primary_=new QKeySequenceEdit;primary_->setObjectName("shortcutPrimary");primary_->setMaximumSequenceLength(1);primary_->setAccessibleName(compositor::ui::localized("Shortcut"));
+    secondary_=new QKeySequenceEdit;secondary_->setObjectName("shortcutSecondary");secondary_->setMaximumSequenceLength(1);secondary_->setAccessibleName(compositor::ui::localized("Alternate shortcut"));
+    clear_=new QPushButton(compositor::ui::localized("Clear"));clear_->setObjectName("shortcutClear");
+    editor->addWidget(new QLabel(compositor::ui::localized("Shortcut")));editor->addWidget(primary_,1);editor->addWidget(new QLabel(compositor::ui::localized("Alternate")));editor->addWidget(secondary_,1);editor->addWidget(clear_);
     layout->addLayout(editor);
     status_=new QLabel;status_->setObjectName("shortcutStatus");status_->setWordWrap(true);layout->addWidget(status_);
     auto* buttons=new QHBoxLayout;
-    auto* restore=new QPushButton("Restore Defaults");restore->setObjectName("shortcutRestoreDefaults");
-    auto* cancel=new QPushButton("Cancel");cancel->setObjectName("shortcutCancel");
-    save_=new QPushButton("Save");save_->setObjectName("shortcutSave");save_->setDefault(true);
+    auto* restore=new QPushButton(compositor::ui::localized("Restore Defaults"));restore->setObjectName("shortcutRestoreDefaults");
+    auto* cancel=new QPushButton(compositor::ui::localized("Cancel"));cancel->setObjectName("shortcutCancel");
+    save_=new QPushButton(compositor::ui::localized("Save"));save_->setObjectName("shortcutSave");save_->setDefault(true);
     buttons->addWidget(restore);buttons->addStretch(1);buttons->addWidget(cancel);buttons->addWidget(save_);
     layout->addLayout(buttons);
     connect(search_,&QLineEdit::textChanged,this,[this]{refreshRows();});

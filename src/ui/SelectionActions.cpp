@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "MainWindow.h"
 #include "SelectionCursors.h"
 #include "editing/PixelEdits.h"
@@ -30,7 +31,7 @@ void MainWindow::setupSelectionActions(){
     qApp->installEventFilter(this);
     selectionScrollTimer_=new QChronoTimer(this);selectionScrollTimer_->setTimerType(Qt::PreciseTimer);selectionScrollTimer_->setInterval(std::chrono::nanoseconds(16666667));
     connect(selectionScrollTimer_,&QChronoTimer::timeout,this,[this]{try{stepSelectionAutoscroll();}catch(const std::exception& error){pointerCancel();statusBar()->showMessage(error.what());}});
-    auto*menu=menuBar()->addMenu("&Select");
+    auto*menu=compositor::ui::localizedMenu(menuBar(), "&Select");
     for(bool expand:{true,false})action(menu,expand?"Expand…":"Contract…",{},[this,expand]{
         auto* p=current();if(!p||!p->document||!p->document->selection)return;
         auto& remembered=expand?selectionExpandAmount_:selectionContractAmount_;bool ok=false;
@@ -49,7 +50,7 @@ void MainWindow::setupSelectionActions(){
             d.selection=Selection{GrayRaster::sampled(d.width,d.height,{0,0,d.width,d.height},[input](int x,int y){return uint8_t(255-input->pixel(x,y));},input->retainedBytes(),std::move(outline))};
         }else{auto gray=std::make_shared<GrayRaster>();gray->width=d.width;gray->height=d.height;gray->pixels.resize(size_t(d.width)*d.height);for(size_t i=0;i<gray->pixels.size();++i)gray->pixels[i]=d.selection->coverage?255-d.selection->coverage->pixels[i]:255;d.selection=Selection{gray};}
     });});
-    auto*clipboard=menuBar()->addMenu("&Clipboard");
+    auto*clipboard=compositor::ui::localizedMenu(menuBar(), "&Clipboard");
     action(clipboard,"Cut",QKeySequence::Cut,[this]{copySelection(false,true);});
     action(clipboard,"Copy",QKeySequence::Copy,[this]{copySelection(false);});
     action(clipboard,"Copy Merged",QKeySequence("Ctrl+Shift+C"),[this]{copySelection(true);});
@@ -57,21 +58,21 @@ void MainWindow::setupSelectionActions(){
     action(clipboard,"Layer via Copy",QKeySequence("Ctrl+J"),[this]{copySelection(false,false,true);});
     action(clipboard,"Clear",{},[this]{pixelEdit(int(editing::PixelEdit::Clear));});
     auto*bar=addToolBar("Selection Options");bar->setObjectName("selectionOptions");
-    auto*marquee=bar->addAction("Marquee (M)");bindCommand(marquee,"Tools","Marquee (M)",[this]{selectTool(Tool::Marquee);});commands_->releaseShortcut(marquee);
-    auto*shape=new QComboBox;shape->addItems({"Rectangle","Ellipse"});shape->setAccessibleName("Marquee shape");bar->addWidget(shape);connect(shape,&QComboBox::currentIndexChanged,this,[this](int v){if(selectionGesture_.active())pointerCancel();ellipse_=v==1;selectTool(Tool::Marquee);});
-    auto*lasso=bar->addAction("Lasso (L)");bindCommand(lasso,"Tools","Lasso (L)",[this]{selectTool(Tool::Lasso);});commands_->releaseShortcut(lasso);
-    auto*polygon=bar->addAction("Polygonal Lasso");bindCommand(polygon,"Tools","Polygon",[this]{selectTool(Tool::Polygon);});commands_->releaseShortcut(polygon);
-    auto*lassoKind=new QComboBox;lassoKind->setObjectName("lassoKind");lassoKind->setAccessibleName("Lasso kind");lassoKind->addItems({"Freehand","Polygonal"});bar->addWidget(lassoKind);
+    auto*marquee=bar->addAction(compositor::ui::localized("Marquee (M)"));bindCommand(marquee,"Tools","Marquee (M)",[this]{selectTool(Tool::Marquee);});commands_->releaseShortcut(marquee);
+    auto*shape=new QComboBox;shape->addItems(compositor::ui::localizedList({"Rectangle","Ellipse"}));shape->setAccessibleName(compositor::ui::localized("Marquee shape"));bar->addWidget(shape);connect(shape,&QComboBox::currentIndexChanged,this,[this](int v){if(selectionGesture_.active())pointerCancel();ellipse_=v==1;selectTool(Tool::Marquee);});
+    auto*lasso=bar->addAction(compositor::ui::localized("Lasso (L)"));bindCommand(lasso,"Tools","Lasso (L)",[this]{selectTool(Tool::Lasso);});commands_->releaseShortcut(lasso);
+    auto*polygon=bar->addAction(compositor::ui::localized("Polygonal Lasso"));bindCommand(polygon,"Tools","Polygon",[this]{selectTool(Tool::Polygon);});commands_->releaseShortcut(polygon);
+    auto*lassoKind=new QComboBox;lassoKind->setObjectName("lassoKind");lassoKind->setAccessibleName(compositor::ui::localized("Lasso kind"));lassoKind->addItems(compositor::ui::localizedList({"Freehand","Polygonal"}));bar->addWidget(lassoKind);
     connect(lassoKind,&QComboBox::currentIndexChanged,this,[this](int index){if(selectionGesture_.active())pointerCancel();lassoKind_=index?editing::LassoKind::Polygonal:editing::LassoKind::Freehand;selectTool(Tool::Lasso);});
     for(bool expand:{true,false}){
         auto* button=bar->addAction(expand?"Expand":"Contract");bindCommand(button,"Select",expand?"Expand…":"Contract…",[this,expand]{resizeSelection(expand,expand?selectionExpandAmount_:selectionContractAmount_);});
         auto* amount=new QSpinBox;amount->setObjectName(expand?"selectionExpandAmount":"selectionContractAmount");amount->setAccessibleName(expand?"Expand pixels":"Contract pixels");amount->setRange(1,500);amount->setValue(1);amount->setSuffix(" px");bar->addWidget(amount);
         connect(amount,&QSpinBox::valueChanged,this,[this,expand](int value){(expand?selectionExpandAmount_:selectionContractAmount_)=value;});
     }
-    auto*mode=new QComboBox;mode->setObjectName("selectionMode");mode->addItems({"New selection","Add","Subtract"});mode->setAccessibleName("Selection mode");bar->addWidget(mode);connect(mode,&QComboBox::currentIndexChanged,this,[this](int i){selectionMode_=editing::SelectionMode(i);});
-    auto*aa=new QCheckBox("Antialias");aa->setChecked(true);bar->addWidget(aa);connect(aa,&QCheckBox::toggled,this,[this](bool v){selectionAntialias_=v;});
-    auto*wandBar=addToolBar("Magic Wand Options");wandBar->setObjectName("wandOptions");auto*tolerance=new QSpinBox;tolerance->setRange(0,255);tolerance->setValue(32);tolerance->setPrefix("Tolerance ");tolerance->setAccessibleName("Wand tolerance");wandBar->addWidget(tolerance);connect(tolerance,&QSpinBox::valueChanged,this,[this](int v){wandTolerance_=v;});
-    auto*sample=new QComboBox;sample->addItems({"Point Sample","3 by 3 Average","5 by 5 Average"});sample->setAccessibleName("Wand sample size");wandBar->addWidget(sample);connect(sample,&QComboBox::currentIndexChanged,this,[this](int v){wandSampleRadius_=v;});auto*contiguous=new QCheckBox("Contiguous");contiguous->setChecked(true);wandBar->addWidget(contiguous);connect(contiguous,&QCheckBox::toggled,this,[this](bool v){wandContiguous_=v;});auto*all=new QCheckBox("Sample All Layers");wandBar->addWidget(all);connect(all,&QCheckBox::toggled,this,[this](bool v){wandAllLayers_=v;});
+    auto*mode=new QComboBox;mode->setObjectName("selectionMode");mode->addItems(compositor::ui::localizedList({"New selection","Add","Subtract"}));mode->setAccessibleName(compositor::ui::localized("Selection mode"));bar->addWidget(mode);connect(mode,&QComboBox::currentIndexChanged,this,[this](int i){selectionMode_=editing::SelectionMode(i);});
+    auto*aa=new QCheckBox(compositor::ui::localized("Antialias"));aa->setChecked(true);bar->addWidget(aa);connect(aa,&QCheckBox::toggled,this,[this](bool v){selectionAntialias_=v;});
+    auto*wandBar=addToolBar("Magic Wand Options");wandBar->setObjectName("wandOptions");auto*tolerance=new QSpinBox;tolerance->setRange(0,255);tolerance->setValue(32);tolerance->setPrefix("Tolerance ");tolerance->setAccessibleName(compositor::ui::localized("Wand tolerance"));wandBar->addWidget(tolerance);connect(tolerance,&QSpinBox::valueChanged,this,[this](int v){wandTolerance_=v;});
+    auto*sample=new QComboBox;sample->addItems(compositor::ui::localizedList({"Point Sample","3 by 3 Average","5 by 5 Average"}));sample->setAccessibleName(compositor::ui::localized("Wand sample size"));wandBar->addWidget(sample);connect(sample,&QComboBox::currentIndexChanged,this,[this](int v){wandSampleRadius_=v;});auto*contiguous=new QCheckBox(compositor::ui::localized("Contiguous"));contiguous->setChecked(true);wandBar->addWidget(contiguous);connect(contiguous,&QCheckBox::toggled,this,[this](bool v){wandContiguous_=v;});auto*all=new QCheckBox(compositor::ui::localized("Sample All Layers"));wandBar->addWidget(all);connect(all,&QCheckBox::toggled,this,[this](bool v){wandAllLayers_=v;});
 }
 void MainWindow::resizeSelection(bool expand,double amount){
     if(!ui::commandEnabled(ui::CommandGate::ModifySelection,commandState()))return;

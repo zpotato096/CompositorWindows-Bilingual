@@ -50,7 +50,8 @@ class QSpinBox;
 class QToolButton;
 
 namespace compositor {
-namespace ui {class ImportQueue;class WorkspaceDropQueue;class LayerOpacityField;class PaletteSwatches;}
+namespace ui {class ImportQueue;class WorkspaceDropQueue;class LayerOpacityField;class PaletteSwatches;class ProjectDiskWatch;}
+struct OpenProject;
 struct EditorProject {
     std::optional<Document> document;
     std::string active;
@@ -73,9 +74,11 @@ struct EditorProject {
     std::shared_ptr<const Document> effectPreview;
     std::string brushLayerId;
     QString path;
+    QString sourceImagePath;
     QString defaultTitle{"Untitled"};
     // Save activity is separate from projectBusy: edits remain allowed while the snapshot is written.
     QPointer<ui::ProjectSaveJob> saveJob;
+    QPointer<ui::ProjectDiskWatch> diskWatch;
     QString saveError;
     // Destination of the pending write; no other open project may save there until it completes.
     QString savePath;
@@ -305,12 +308,16 @@ private:
     void focusStackImages();
     void importWelcomeImage();
     void exportImage();
+    void exportLayerPngs();
     void openProjectDialog();
     void setupRecentProjectsMenu(QMenu* file);
     void noteRecentProject(const QString& path);
     bool loadProjectDirectory(const QString&);
+    void watchProject(EditorProject&,std::string fingerprint);
+    void reloadChangedProject(EditorProject&,OpenProject);
     bool saveProject(bool saveAs=false);
-    void startProjectSave(EditorProject&,const QString& path);
+    void startProjectSave(EditorProject&,const QString& path,bool macCompatible=false);
+    void saveMacProjectCopy();
     // Blocks the close flow until the project's pending write finishes. Returns false if that write failed.
     bool waitForProjectSave(EditorProject&);
     std::function<void()> projectSaveBeforeWrite_;

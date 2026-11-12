@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "MainWindow.h"
 #include "AdjustmentDialog.h"
 #include "SubjectPanel.h"
@@ -63,8 +64,8 @@ std::function<void()> installLensViewportPreview(
 }
 }
 void MainWindow::setupAdjustmentActions(){
-    auto*menu=menuBar()->addMenu("&Adjustments");
-    auto*live=menu->addMenu("New Adjustment Layer");
+    auto*menu=compositor::ui::localizedMenu(menuBar(), "&Adjustments");
+    auto*live=compositor::ui::localizedMenu(menu, "New Adjustment Layer");
     for(const QString kind:{"Hue/Saturation","Levels","Curves","Exposure","Gradient Map","Grain","Invert","Black & White","Color Balance","Gaussian Blur","Motion Blur","Add Noise","Progressive Blur","Bloom / Glow","RGB Split"}){
         const QString label=kind=="Black & White"?"Black and White":kind;
         action(menu,label+"…",{},[this,kind]{adjust(kind,false);});
@@ -73,16 +74,18 @@ void MainWindow::setupAdjustmentActions(){
     action(live,"Vignette…",{},[this]{adjust("Vignette",true);});
     action(live,"Tonal Contrast…",{},[this]{adjust("Tonal Contrast",true);});
     action(live,"Lens Effects…",{},[this]{adjust("Lens Effects",true);});
+    action(live,"Sharpen…",{},[this]{adjust("Sharpen",true);});
+    action(live,"Reduce Noise…",{},[this]{adjust("Reduce Noise",true);});
     action(menu,"Edit Adjustment Layer…",{},[this]{if(active()&&!active()->adjustmentJson.empty())adjust({},true,true);});
-    auto*filters=menuBar()->addMenu("&Filters");
+    auto*filters=compositor::ui::localizedMenu(menuBar(), "&Filters");
     lastFilterAction_=action(filters,"Last Filter",{},[this]{repeatLastFilter();});
     connect(filters,&QMenu::aboutToShow,this,[this]{
         auto* project=current();
-        if(!project||!project->toolState.lastFilterKind)lastFilterAction_->setText("Last Filter");
-        else lastFilterAction_->setText("Last Filter: "+filterKindDisplayName(*project->toolState.lastFilterKind));
+        if(!project||!project->toolState.lastFilterKind)lastFilterAction_->setText(compositor::ui::localized("Last Filter"));
+        else lastFilterAction_->setText(ui::localized("Last Filter: %1").arg(ui::localized(filterKindDisplayName(*project->toolState.lastFilterKind))));
     });
     filters->addSeparator();
-    const struct {const char* name;int kind;} filterItems[]{{"Gaussian Blur",0},{"Progressive Blur",11},{"Motion Blur",1},{"Add Noise",2},{"Lens Correction",3},{"Camera Raw Filter",10},{"Content-Aware Fill",4},{"Vignette",5},{"Bloom",6},{"Tonal Contrast",7},{"Dither",8},{"Scanlines",9},{"RGB Split",12},{"Lens Effects",13}};
+    const struct {const char* name;int kind;} filterItems[]{{"Gaussian Blur",0},{"Progressive Blur",11},{"Motion Blur",1},{"Add Noise",2},{"Lens Correction",3},{"Camera Raw Filter",10},{"Content-Aware Fill",4},{"Vignette",5},{"Bloom",6},{"Tonal Contrast",7},{"Dither",8},{"Scanlines",9},{"RGB Split",12},{"Lens Effects",13},{"Sharpen",14},{"Reduce Noise",15},{"Rim Light",16},{"Volumetric Light",17}};
     for(const auto& item:filterItems)action(filters,QString(item.name)+"…",{},[this,kind=item.kind]{runFilter(kind);});
     action(filters,"Remove Background…",{},[this]{removeBackground();});
 }

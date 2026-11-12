@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "LastFilterJob.h"
 #include <optional>
 #include <QFutureWatcher>
@@ -16,7 +17,7 @@ struct LastFilterJob::Impl {
     QFutureWatcher<Result> watcher;
     QProgressDialog progress;
     explicit Impl(QWidget* parent):progress("Applying last filter…","Cancel",0,0,parent){
-        progress.setObjectName("lastFilterProgress");progress.setWindowTitle("Last Filter");
+        progress.setObjectName("lastFilterProgress");progress.setWindowTitle(compositor::ui::localized("Last Filter"));
         progress.setWindowModality(Qt::NonModal);progress.setMinimumDuration(0);
         progress.setAutoClose(false);progress.setAutoReset(false);
     }
@@ -24,7 +25,7 @@ struct LastFilterJob::Impl {
 LastFilterJob::LastFilterJob(std::function<Layer(std::function<bool()>)> work,Host host,QWidget* parent,EditorProject* owner,const QString& progressText)
     :QObject(parent),impl_(std::make_unique<Impl>(parent)){
     if(!work||!host.commit||!host.settled||!host.error||!owner)throw std::invalid_argument("Incomplete last-filter job");
-    if(!progressText.isEmpty()){impl_->progress.setProperty("studioChrome",true);impl_->progress.setLabelText(progressText);impl_->progress.setWindowTitle("Convert HDR to 16-Bit");}
+    if(!progressText.isEmpty()){impl_->progress.setProperty("studioChrome",true);impl_->progress.setLabelText(progressText);impl_->progress.setWindowTitle(compositor::ui::localized("Convert HDR to 16-Bit"));}
     setObjectName("lastFilterJob");impl_->host=std::move(host);impl_->owner=owner;
     connect(&impl_->progress,&QProgressDialog::canceled,this,[this]{cancel();});
     connect(&impl_->watcher,&QFutureWatcher<Impl::Result>::finished,this,[this]{

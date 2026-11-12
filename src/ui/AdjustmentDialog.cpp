@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "AdjustmentDialog.h"
 #include "NativeCanvas.h"
 #include "DocumentPreview.h"
@@ -53,7 +54,7 @@ public:
     std::function<bool(Point)> onBeginDrag;
     std::function<void(double,bool)> onDrag;
     std::function<void()> onEndDrag;
-    AdjustmentPreview(){setObjectName("adjustmentPreview");setAccessibleName("Adjustment preview; click to sample, drag for targeted hue adjustment");}
+    AdjustmentPreview(){setObjectName("adjustmentPreview");setAccessibleName(compositor::ui::localized("Adjustment preview; click to sample, drag for targeted hue adjustment"));}
 private:
     bool dragging_{};double anchor_{};
     QRectF imageRect()const{
@@ -226,40 +227,63 @@ class AdjustmentPanel final:public ui::EditPanelSession {
         if(kind=="RGB Split")layer["rgbSplitCenter"]=jsonPoint({original.width/2.,original.height/2.});
         settings["filterLayerSettings"]=layer;
     }
-    dialog.mayReject=[this]{return !committing_;};dialog.setObjectName("adjustmentDialog");dialog.setWindowTitle(kind);dialog.resize(840,560);
+    dialog.mayReject=[this]{return !committing_;};dialog.setObjectName("adjustmentDialog");dialog.setWindowTitle(ui::localized(kind));dialog.resize(840,560);
     layout.addWidget(&fields);
     preview.documentWidth=original.width;preview.documentHeight=original.height;preview.setMinimumSize(400,300);preview.setAlignment(Qt::AlignCenter);rightLayout.addWidget(&preview,1);status.setWordWrap(true);rightLayout.addWidget(&status);
     previewEnabled.setObjectName("adjustmentPreviewEnabled");previewEnabled.setChecked(true);rightLayout.addWidget(&previewEnabled);
     rightLayout.addWidget(&buttons);layout.addWidget(&right,1);
     apply=buttons.button(QDialogButtonBox::Apply);apply->setEnabled(false);apply->setDefault(true);buttons.button(QDialogButtonBox::Cancel)->setAutoDefault(false);
     debounce.setSingleShot(true);debounce.setInterval(kind=="Lens Effects"?32:100);
-    changed=[this]{++revision;if(watcher.isRunning())previewCancelled->store(true);apply->setEnabled(false);if(!previewEnabled.isChecked()&&host_.preview)host_.preview({});status.setText("Updating preview…");if(kind!="Lens Effects"||!debounce.isActive())debounce.start();};
+    changed=[this]{++revision;if(watcher.isRunning())previewCancelled->store(true);apply->setEnabled(false);if(!previewEnabled.isChecked()&&host_.preview)host_.preview({});status.setText(compositor::ui::localized("Updating preview…"));if(kind!="Lens Effects"||!debounce.isActive())debounce.start();};
     QObject::connect(&previewEnabled,&QCheckBox::toggled,&dialog,changed);
     auto number=[&](const QString&label,double value,double lo,double hi,int decimals,double fallback,std::function<void(double)>setter){
         const int stepDecimals=kind=="Grain"?(label=="Size"?1:0):kind=="Hue/Saturation"?0:kind=="Levels"&&label!="Gamma"?0:decimals;
-        auto*spin=new ui::PropertyNumber;spin->setSingleStep(std::pow(10.,-stepDecimals));spin->setRange(lo,hi);spin->setDecimals(decimals);spin->setValue(value);spin->setAccessibleName(label);
-        const bool filterLike=kind=="Lens Effects"||kind=="Tonal Contrast"||kind=="Vignette"||kind=="Progressive Blur"||kind=="Bloom / Glow"||kind=="RGB Split";
+        auto*spin=new ui::PropertyNumber;spin->setSingleStep(std::pow(10.,-stepDecimals));spin->setRange(lo,hi);spin->setDecimals(decimals);spin->setValue(value);spin->setAccessibleName(ui::localized(label));
+        const bool filterLike=kind=="Sharpen"||kind=="Reduce Noise"||kind=="Lens Effects"||kind=="Tonal Contrast"||kind=="Vignette"||kind=="Progressive Blur"||kind=="Bloom / Glow"||kind=="RGB Split";
         if(kind=="Exposure"||kind=="Grain"||kind=="Hue/Saturation"||kind=="Black & White"||filterLike){
-            auto* row=new QWidget;auto* rowLayout=new QHBoxLayout(row);rowLayout->setContentsMargins(0,0,0,0);auto* slider=new ui::TrackSlider(Qt::Horizontal);slider->setRange(0,10000);slider->setAccessibleName(label+" slider");
+            auto* row=new QWidget;auto* rowLayout=new QHBoxLayout(row);rowLayout->setContentsMargins(0,0,0,0);auto* slider=new ui::TrackSlider(Qt::Horizontal);slider->setRange(0,10000);slider->setAccessibleName(ui::localized("%1 slider").arg(ui::localized(label)));
             const bool logarithmic=filterLike?((label=="Radius"||label=="Distance"||label=="Amount")&&lo>0):(label=="Gamma"||label=="Size");const double first=logarithmic?std::log(lo):lo,last=logarithmic?std::log(hi):hi;
             auto position=[first,last,logarithmic](double v){return int(std::lround(((logarithmic?std::log(v):v)-first)/(last-first)*10000));};
-            slider->setValue(position(spin->value()));slider->setDefaultValue(position(fallback));slider->setMinimumWidth(170);spin->setFixedWidth(82);rowLayout->addWidget(slider,1);rowLayout->addWidget(spin);form.addRow(label,row);
+            slider->setValue(position(spin->value()));slider->setDefaultValue(position(fallback));slider->setMinimumWidth(170);spin->setFixedWidth(82);rowLayout->addWidget(slider,1);rowLayout->addWidget(spin);form.addRow(ui::localized(label),row);
             if(kind=="Hue/Saturation"){
                 const auto stops=label=="Hue"?"stop:0 #db6868, stop:0.17 #d5c46b, stop:0.33 #7bb878, stop:0.5 #6bbcc3, stop:0.67 #738cda, stop:0.83 #c879c5, stop:1 #db6868":label=="Saturation"?"stop:0 #777b84, stop:1 #629ee9":"stop:0 #17181c, stop:1 #edf0f4";
                 slider->setStyleSheet(QString("QSlider::groove:horizontal { height: 6px; border-radius: 3px; background: qlineargradient(x1:0,y1:0,x2:1,y2:0,%1); } QSlider::sub-page:horizontal { background: transparent; }").arg(stops));
             }
             QObject::connect(slider,&QSlider::valueChanged,&dialog,[spin,first,last,logarithmic,stepDecimals](int v){const double normalized=first+(last-first)*v/10000.;const double factor=std::pow(10.,stepDecimals);spin->setValue(std::round((logarithmic?std::exp(normalized):normalized)*factor)/factor);});
             QObject::connect(spin,&QDoubleSpinBox::valueChanged,&dialog,[slider,position](double v){QSignalBlocker block(slider);slider->setValue(position(v));});
-        }else form.addRow(label,spin);
+        }else form.addRow(ui::localized(label),spin);
         QObject::connect(spin,&QDoubleSpinBox::valueChanged,&dialog,[&,setter](double v){if(loadingSettings_)return;setter(v);changed();});return spin;};
-    auto flag=[&](const QString&label,bool value,std::function<void(bool)>setter){auto*box=new QCheckBox(label);box->setChecked(value);form.addRow(box);QObject::connect(box,&QCheckBox::toggled,&dialog,[&,setter](bool v){if(loadingSettings_)return;setter(v);changed();});return box;};
+    auto flag=[&](const QString&label,bool value,std::function<void(bool)>setter){auto*box=new QCheckBox(ui::localized(label));box->setChecked(value);form.addRow(box);QObject::connect(box,&QCheckBox::toggled,&dialog,[&,setter](bool v){if(loadingSettings_)return;setter(v);changed();});return box;};
     auto property=[&](const QString&group,const QString&key,const QString&label,double fallback,double lo,double hi,int decimals){auto* spin=number(label,settings[group].toObject().value(key).toDouble(fallback),lo,hi,decimals,fallback,[&,group,key](double v){auto o=settings[group].toObject();o[key]=v;settings[group]=o;});reloadControls.push_back([this,spin,group,key,fallback]{spin->setValue(settings[group].toObject().value(key).toDouble(fallback));});return spin;};
     if(kind=="Exposure"){
         property("exposureSettings","exposure","Exposure",0,-20,20,2);property("exposureSettings","offset","Offset",0,-.5,.5,4);property("exposureSettings","gamma","Gamma",1,.01,9.99,2);
+    }else if(kind=="Sharpen"||kind=="Reduce Noise"){
+        const bool sharpening=kind=="Sharpen";
+        const QString group=sharpening?"sharpen":"reduceNoise";
+        const auto defaults=QJsonDocument::fromJson(QByteArray::fromStdString(effects::defaultAdjustmentJson(kind.toStdString())))
+            .object().value("filterLayerSettings").toObject().value(group).toObject();
+        const auto addDetailControl=[&,group,defaults](const QString& key,const QString& label,double lo,double hi,int decimals){
+            const double fallback=defaults.value(key).toDouble();
+            const auto read=[this,group,key,fallback]{return filterLayer().value(group).toObject().value(key).toDouble(fallback);};
+            auto* control=number(label,read(),lo,hi,decimals,fallback,[this,group,key,defaults](double value){
+                auto layer=filterLayer();auto detail=layer.value(group).toObject();
+                if(detail.isEmpty())detail=defaults;
+                detail[key]=value;layer[group]=detail;writeFilterLayer(layer);
+            });
+            reloadControls.push_back([control,read]{control->setValue(read());});
+        };
+        if(sharpening){
+            addDetailControl("amount","Amount",0,300,0);
+            addDetailControl("radius","Radius",.1,20,1);
+        }else{
+            addDetailControl("strength","Strength",0,100,0);
+            addDetailControl("details","Details",0,100,0);
+            addDetailControl("color","Color",0,100,0);
+        }
     }else if(kind=="Lens Effects"){
         const QStringList modes{"Anamorphic Flare","Starburst","Mist","Prism","Bokeh"};
         auto* mode=new QComboBox;mode->setObjectName("lensEffectMode");mode->addItems(modes);
-        mode->setCurrentText(lensSettings()["effect"].toString());form.addRow("Effect",mode);
+        mode->setCurrentText(lensSettings()["effect"].toString());form.addRow(compositor::ui::localized("Effect"),mode);
         QObject::connect(mode,&QComboBox::currentTextChanged,&dialog,[this](const QString& value){auto v=lensSettings();v["effect"]=value;writeLens(v);changed();});
         std::array<std::pair<int,int>,5> rows{};
         auto add=[&](int group,const char* key,const char* label,double lo,double hi,int decimals){
@@ -271,13 +295,13 @@ class AdjustmentPanel final:public ui::EditPanelSession {
         };
         add(0,"threshold","Threshold",50,100,1);add(0,"flareAmount","Strength",0,100,1);add(0,"flareLength","Length",1,100,1);add(0,"flareBlue","Blue",0,100,1);
         add(1,"threshold","Threshold",50,100,1);add(1,"starAmount","Star strength",0,100,1);add(1,"starLength","Star length",2,40,1);add(1,"starAngle","Star angle",-180,180,1);
-        auto* points=new QComboBox;points->setObjectName("lensStarPoints");points->addItems({"4","6","8","12","14"});points->setCurrentText(QString::number(lensSettings()["starPoints"].toInt()));form.addRow("Points",points);rows[1].second=form.rowCount();
+        auto* points=new QComboBox;points->setObjectName("lensStarPoints");points->addItems(compositor::ui::localizedList({"4","6","8","12","14"}));points->setCurrentText(QString::number(lensSettings()["starPoints"].toInt()));form.addRow(compositor::ui::localized("Points"),points);rows[1].second=form.rowCount();
         QObject::connect(points,&QComboBox::currentTextChanged,&dialog,[this](const QString& value){auto v=lensSettings();v["starPoints"]=value.toInt();writeLens(v);changed();});
         add(2,"mistStrength","Mist strength",0,100,1);add(2,"mistSize","Size",0,100,1);
         add(3,"prismAmount","Prism strength",0,100,1);add(3,"prismCopies","Copies",1,8,0);add(3,"prismOffset","Offset",0,50,1);add(3,"prismAngle","Prism angle",-180,180,1);add(3,"prismBlur","Blur",0,100,1);
         flag("Both ways",lensSettings()["prismBothWays"].toBool(),[this](bool value){auto v=lensSettings();v["prismBothWays"]=value;writeLens(v);});rows[3].second=form.rowCount();
         add(4,"bokehRadius","Radius",.5,6,1);add(4,"bokehBrightness","Brightness",0,100,1);add(4,"bokehRing","Ring",0,100,1);
-        auto* shape=new QComboBox;shape->setObjectName("lensBokehShape");shape->addItems({"Round","Hexagon","Oval","Cat's Eye"});shape->setCurrentText(lensSettings()["bokehShape"].toString());form.addRow("Shape",shape);rows[4].second=form.rowCount();
+        auto* shape=new QComboBox;shape->setObjectName("lensBokehShape");shape->addItems(compositor::ui::localizedList({"Round","Hexagon","Oval","Cat's Eye"}));shape->setCurrentText(lensSettings()["bokehShape"].toString());form.addRow(compositor::ui::localized("Shape"),shape);rows[4].second=form.rowCount();
         QObject::connect(shape,&QComboBox::currentTextChanged,&dialog,[this](const QString& value){auto v=lensSettings();v["bokehShape"]=value;writeLens(v);changed();});
         auto show=[this,rows](int current){for(int group=0;group<5;++group)for(int row=rows[group].first;row<rows[group].second;++row)form.setRowVisible(row,group==current);};
         show(mode->currentIndex());QObject::connect(mode,&QComboBox::currentIndexChanged,&dialog,show);
@@ -295,9 +319,9 @@ class AdjustmentPanel final:public ui::EditPanelSession {
             auto* spin=number(label,fallback,key=="roundness"?-100:0,100,1,fallback,[this,key](double value){auto v=vignetteSettings();v[key]=value;writeVignette(v);});
             reloadControls.push_back([this,spin,key]{spin->setValue(vignetteSettings()[key].toDouble());});
         }
-        auto* color=new QToolButton;color->setObjectName("vignetteColor");color->setAccessibleName("Vignette color");color->setFixedSize(36,22);
+        auto* color=new QToolButton;color->setObjectName("vignetteColor");color->setAccessibleName(compositor::ui::localized("Vignette color"));color->setFixedSize(36,22);
         auto update=[this,color]{auto c=vignetteSettings()["color"].toObject();const auto hex=QColor::fromRgbF(c["red"].toDouble(),c["green"].toDouble(),c["blue"].toDouble()).name();color->setToolTip(hex);color->setAccessibleDescription(hex);color->setStyleSheet(QString("QToolButton#vignetteColor { background: %1; border: 1px solid palette(mid); border-radius: 4px; padding: 0; min-width: 0; min-height: 20px; } QToolButton#vignetteColor:hover { border-color: #bfc9d8; } QToolButton#vignetteColor:pressed, QToolButton#vignetteColor:focus { border-color: #78b0f7; }").arg(hex));};
-        update();reloadControls.push_back(update);form.addRow("Color",color);
+        update();reloadControls.push_back(update);form.addRow(compositor::ui::localized("Color"),color);
         QObject::connect(color,&QToolButton::clicked,&dialog,[this,update]{
             const auto c=vignetteSettings()["color"].toObject();
             auto store=[owner=QPointer<AdjustmentPanel>(this),update](effects_tools::PaletteColor color){if(!owner||owner->closed_||owner->committing_)return;auto v=owner->vignetteSettings();v["color"]=Object{{"red",color.red},{"green",color.green},{"blue",color.blue}};owner->writeVignette(v);update();owner->changed();};
@@ -312,7 +336,7 @@ class AdjustmentPanel final:public ui::EditPanelSession {
         const QStringList leftLabels{"Cyan","Magenta","Yellow"},rightLabels{"Red","Green","Blue"};
         auto write=[this](const QString& channel,double value){auto group=settings["colorBalanceSettings"].toObject();auto band=group[balanceTone].toObject();band[channel]=value;group[balanceTone]=band;settings["colorBalanceSettings"]=group;};
         auto* levels=new QWidget;auto* levelsLayout=new QHBoxLayout(levels);levelsLayout->setContentsMargins(0,0,0,0);
-        levelsLayout->addWidget(new QLabel("Color Levels:"));
+        levelsLayout->addWidget(new QLabel(compositor::ui::localized("Color Levels:")));
         std::array<QSpinBox*,3> levelBoxes{};std::array<ui::TrackSlider*,3> sliders{};
         auto* sliderArea=new QWidget;auto* grid=new QGridLayout(sliderArea);grid->setContentsMargins(0,10,0,0);grid->setVerticalSpacing(10);
         for(int i=0;i<3;++i){
@@ -352,45 +376,45 @@ class AdjustmentPanel final:public ui::EditPanelSession {
                 auto color=QColorDialog::getColor(QColor::fromRgbF(c["red"].toDouble(),c["green"].toDouble(),c["blue"].toDouble()),&dialog,key);if(color.isValid()){o[key]=Object{{"red",color.redF()},{"green",color.greenF()},{"blue",color.blueF()}};settings["gradientMapSettings"]=o;update();changed();}});}
         auto* reverse=flag("Reverse",settings["gradientMapSettings"].toObject()["reversed"].toBool(),[&](bool v){auto o=settings["gradientMapSettings"].toObject();o["reversed"]=v;settings["gradientMapSettings"]=o;});reloadControls.push_back([this,reverse]{reverse->setChecked(settings["gradientMapSettings"].toObject()["reversed"].toBool());});
     }else if(kind=="Levels"){
-        auto* channel=new QComboBox;channel->setObjectName("levelsChannel");channel->addItems({"RGB","Red","Green","Blue"});form.addRow("Channel",channel);
+        auto* channel=new QComboBox;channel->setObjectName("levelsChannel");channel->addItems(compositor::ui::localizedList({"RGB","Red","Green","Blue"}));form.addRow(compositor::ui::localized("Channel"),channel);
         auto* controls=new LevelsAdvancedControls;levelsControls=controls;controls->setAdjustmentJson(encoded(settings));form.addRow(controls);
         std::array<QDoubleSpinBox*,5> values{};const QStringList labels{"Input black","Gamma","Input white","Output black","Output white"};
         for(int i=0;i<5;++i){values[size_t(i)]=number(labels[i],i==1?1:i>=2?255:0,i==1?.1:0,i==1?9.99:255,i==1?2:1,i==1?1:i>=2?255:0,[&,controls,i](double value){auto typed=effects_tools::levelsFromAdjustmentJson(encoded(settings));auto& range=typed.ranges[size_t(typed.channel)];double* fields[]{&range.black,&range.gamma,&range.white,&range.outputBlack,&range.outputWhite};*fields[i]=value;settings=QJsonDocument::fromJson(QByteArray::fromStdString(effects_tools::withLevelsSettings(encoded(settings),typed))).object();controls->setAdjustmentJson(encoded(settings));});values[size_t(i)]->setObjectName(QString("levelsValue%1").arg(i));}
         for(auto* value:values){auto row=form.takeRow(value);if(row.labelItem)delete row.labelItem->widget();delete row.labelItem;delete row.fieldItem;}
         for(int startIndex:{0,3}){
             auto* row=new QWidget;auto* columns=new QHBoxLayout(row);columns->setContentsMargins(0,0,0,0);columns->setSpacing(12);
-            for(int i=startIndex;i<(startIndex==0?3:5);++i){auto* column=new QVBoxLayout;column->setSpacing(5);auto* label=new QLabel(labels[i]);label->setStyleSheet("color: #989ba3; font-size: 11px;");column->addWidget(label);column->addWidget(values[size_t(i)]);columns->addLayout(column,1);}
+            for(int i=startIndex;i<(startIndex==0?3:5);++i){auto* column=new QVBoxLayout;column->setSpacing(5);auto* label=new QLabel(ui::localized(labels[i]));label->setStyleSheet("color: #989ba3; font-size: 11px;");column->addWidget(label);column->addWidget(values[size_t(i)]);columns->addLayout(column,1);}
             form.addRow(row);
         }
         auto load=[&,channel,values,controls]{auto typed=effects_tools::levelsFromAdjustmentJson(encoded(settings));QSignalBlocker block(channel);channel->setCurrentIndex(int(typed.channel));auto range=typed.ranges[size_t(typed.channel)].normalized();const double inputs[]{range.black,range.gamma,range.white,range.outputBlack,range.outputWhite};for(int i=0;i<5;++i){QSignalBlocker spin(values[size_t(i)]);values[size_t(i)]->setValue(inputs[i]);}controls->setAdjustmentJson(encoded(settings));};load();reloadControls.push_back(load);
         QObject::connect(channel,&QComboBox::currentIndexChanged,&dialog,[&,channel,load]{auto typed=effects_tools::levelsFromAdjustmentJson(encoded(settings));typed.channel=effects_tools::LevelsChannel(channel->currentIndex());settings=QJsonDocument::fromJson(QByteArray::fromStdString(effects_tools::withLevelsSettings(encoded(settings),typed))).object();load();changed();});
         for(auto* spin:values)QObject::connect(spin,&QDoubleSpinBox::valueChanged,&dialog,[load]{load();});
         controls->onChanged=[&,load](const std::string& json){settings=QJsonDocument::fromJson(QByteArray::fromStdString(json)).object();load();changed();};
-        auto* reset=new QPushButton("Reset Levels");reset->setObjectName("levelsReset");form.addRow(reset);QObject::connect(reset,&QPushButton::clicked,&dialog,[&,load]{settings=QJsonDocument::fromJson(QByteArray::fromStdString(effects_tools::withLevelsSettings(encoded(settings),{}))).object();load();changed();});
+        auto* reset=new QPushButton(compositor::ui::localized("Reset Levels"));reset->setObjectName("levelsReset");form.addRow(reset);QObject::connect(reset,&QPushButton::clicked,&dialog,[&,load]{settings=QJsonDocument::fromJson(QByteArray::fromStdString(effects_tools::withLevelsSettings(encoded(settings),{}))).object();load();changed();});
         auto sample=std::make_shared<HistogramResult>();
         controls->onSampleModeChanged=[&](auto mode){preview.setCursor(mode?Qt::CrossCursor:Qt::ArrowCursor);};
         preview.onClick=[&,controls,sample](Point point){if(!controls->sampleMode())return;try{auto rgb=sample->composite?sampleDocumentOriginalRGB(*sample->composite,point):sample->sample?effects_tools::sampleOriginalRGB(*sample->sample,sample->transform,point,original.width,original.height):std::nullopt;if(rgb)controls->applySample(*rgb);}catch(const std::exception& error){status.setText(error.what());}};
         QObject::connect(&histogramWatcher,&QFutureWatcher<HistogramResult>::finished,&dialog,[&,controls,sample]{if(closing){retire();return;}*sample=histogramWatcher.result();if(!sample->error.isEmpty()){status.setText(sample->error);return;}controls->setHistogram(sample->bins);});
         histogramWatcher.setFuture(QtConcurrent::run([original=original,active=active,live=live,existing=existing,insertedId=insertedId,histogramCancelled=histogramCancelled]{HistogramResult result;try{result.transform={0,0,double(original.width),double(original.height)};auto found=std::find_if(original.layers.begin(),original.layers.end(),[&](const Layer& layer){return layer.id==active;});if(!live){if(found==original.layers.end()||!found->raster)throw std::runtime_error("Select an image layer");result.sample=found->raster;result.transform=found->transform;result.bins=levelsPreviewHistogram(*result.sample,result.transform,original,[histogramCancelled]{return histogramCancelled->load();}).bins;}else{result.composite=std::make_shared<const Document>(levelsInput(original,active,existing,insertedId));result.bins=documentLevelsPreviewHistogram(*result.composite,[histogramCancelled]{return histogramCancelled->load();});}}catch(const std::exception& error){result.error=error.what();}return result;}));
     }else if(kind=="Curves"){
-        auto* channel=new QComboBox;channel->setObjectName("curvesChannel");channel->addItems({"RGB","Red","Green","Blue"});channel->setCurrentIndex(int(effects_tools::curvesFromAdjustmentJson(encoded(settings)).channel));form.addRow("Channel",channel);
+        auto* channel=new QComboBox;channel->setObjectName("curvesChannel");channel->addItems(compositor::ui::localizedList({"RGB","Red","Green","Blue"}));channel->setCurrentIndex(int(effects_tools::curvesFromAdjustmentJson(encoded(settings)).channel));form.addRow(compositor::ui::localized("Channel"),channel);
         auto* controls=new CurvesAdvancedControls;controls->setAdjustmentJson(encoded(settings));form.addRow(controls);
         reloadControls.push_back([this,channel,controls]{QSignalBlocker block(channel);channel->setCurrentIndex(int(effects_tools::curvesFromAdjustmentJson(encoded(settings)).channel));controls->setAdjustmentJson(encoded(settings));});
         controls->onChanged=[&](const std::string& json){settings=QJsonDocument::fromJson(QByteArray::fromStdString(json)).object();changed();};
         QObject::connect(channel,&QComboBox::currentIndexChanged,&dialog,[&,channel,controls]{auto typed=effects_tools::curvesFromAdjustmentJson(encoded(settings));typed.channel=effects_tools::LevelsChannel(channel->currentIndex());settings=QJsonDocument::fromJson(QByteArray::fromStdString(effects_tools::withCurvesSettings(encoded(settings),typed))).object();controls->setAdjustmentJson(encoded(settings));changed();});
     }else if(kind=="Hue/Saturation"){
         settings=QJsonDocument::fromJson(QByteArray::fromStdString(effects_tools::withHueSettings(encoded(settings),effects_tools::hueFromAdjustmentJson(encoded(settings))))).object();
-        auto* range=new QComboBox;range->setObjectName("hueRange");range->addItems({"Master","Reds","Yellows","Greens","Cyans","Blues","Magentas"});form.addRow("Range",range);
+        auto* range=new QComboBox;range->setObjectName("hueRange");range->addItems(compositor::ui::localizedList({"Master","Reds","Yellows","Greens","Cyans","Blues","Magentas"}));form.addRow(compositor::ui::localized("Range"),range);
         auto* controls=new HueAdvancedControls;hueControls=controls;controls->setAdjustmentJson(encoded(settings));
         std::array<QDoubleSpinBox*,3> spins{};const QStringList labels{"Hue","Saturation","Lightness"};
         for(int i=0;i<3;++i){spins[size_t(i)]=number(labels[i],0,i==0?-180:-100,i==0?180:100,1,0,[&,controls,i](double value){auto typed=effects_tools::hueFromAdjustmentJson(encoded(settings));auto& adjustment=typed.adjustments[size_t(typed.range)];if(i==0)adjustment.hue=value;else if(i==1)adjustment.saturation=value;else adjustment.lightness=value;settings=QJsonDocument::fromJson(QByteArray::fromStdString(effects_tools::withHueSettings(encoded(settings),typed))).object();controls->setAdjustmentJson(encoded(settings));});spins[size_t(i)]->setObjectName(QString("hueValue%1").arg(i));}
-        form.addRow(controls);auto* outside=new QCheckBox("Apply outside this range instead");outside->setObjectName("hueInvertRange");form.addRow(outside);auto* colorize=new QCheckBox("Colorize");colorize->setObjectName("hueColorize");form.addRow(colorize);
+        form.addRow(controls);auto* outside=new QCheckBox(compositor::ui::localized("Apply outside this range instead"));outside->setObjectName("hueInvertRange");form.addRow(outside);auto* colorize=new QCheckBox(compositor::ui::localized("Colorize"));colorize->setObjectName("hueColorize");form.addRow(colorize);
         auto load=[&,range,controls,spins,outside,colorize]{auto typed=effects_tools::hueFromAdjustmentJson(encoded(settings));QSignalBlocker rangeBlock(range),outsideBlock(outside),colorizeBlock(colorize);range->setCurrentIndex(int(typed.range));range->setEnabled(!typed.colorize);outside->setChecked(typed.invertRange);outside->setVisible(typed.range!=effects_tools::ColorRange::Master&&!typed.colorize);colorize->setChecked(typed.colorize);auto value=typed.adjustments[size_t(typed.range)];double inputs[]{value.hue,value.saturation,value.lightness};for(int i=0;i<3;++i){QSignalBlocker spin(spins[size_t(i)]);spins[size_t(i)]->setRange(i==0?(typed.colorize?0:-180):i==1&&typed.colorize?0:-100,i==0?(typed.colorize?360:180):100);spins[size_t(i)]->setValue(inputs[i]);}controls->setAdjustmentJson(encoded(settings));};load();reloadControls.push_back(load);
         auto store=[&,load](const effects_tools::HueSettings& typed){settings=QJsonDocument::fromJson(QByteArray::fromStdString(effects_tools::withHueSettings(encoded(settings),typed))).object();load();changed();};
         QObject::connect(range,&QComboBox::currentIndexChanged,&dialog,[&,range,store]{auto typed=effects_tools::hueFromAdjustmentJson(encoded(settings));typed.range=effects_tools::ColorRange(range->currentIndex());store(typed);});
         QObject::connect(outside,&QCheckBox::toggled,&dialog,[&,store](bool value){auto typed=effects_tools::hueFromAdjustmentJson(encoded(settings));typed.invertRange=value;store(typed);});
         QObject::connect(colorize,&QCheckBox::toggled,&dialog,[store](bool value){store(value?effects_tools::HueSettings::colorizeStart():effects_tools::HueSettings{});});
-        auto* reset=new QPushButton("Reset Hue/Saturation");reset->setObjectName("hueReset");form.addRow(reset);QObject::connect(reset,&QPushButton::clicked,&dialog,[&,store]{store(effects_tools::hueFromAdjustmentJson(encoded(settings)).colorize?effects_tools::HueSettings::colorizeStart():effects_tools::HueSettings{});});
+        auto* reset=new QPushButton(compositor::ui::localized("Reset Hue/Saturation"));reset->setObjectName("hueReset");form.addRow(reset);QObject::connect(reset,&QPushButton::clicked,&dialog,[&,store]{store(effects_tools::hueFromAdjustmentJson(encoded(settings)).colorize?effects_tools::HueSettings::colorizeStart():effects_tools::HueSettings{});});
         controls->onChanged=[&,load](const std::string& json){settings=QJsonDocument::fromJson(QByteArray::fromStdString(json)).object();load();changed();};
         auto cursor=[&,controls]{preview.setCursor(controls->sampleMode()||controls->targeting()?Qt::CrossCursor:Qt::ArrowCursor);};controls->onSampleModeChanged=[cursor](auto){cursor();};controls->onTargetingChanged=[cursor](bool){cursor();};
         auto colorAt=[&](Point point)->std::optional<effects_tools::PaletteColor>{try{if(host_.sampleComposite)return host_.sampleComposite(point);return effects_tools::sampleCompositeColor(previewEnabled.isChecked()&&completed?completed->document:original,point,SoftwareRenderer());}catch(const std::exception& error){status.setText(error.what());return {};}};

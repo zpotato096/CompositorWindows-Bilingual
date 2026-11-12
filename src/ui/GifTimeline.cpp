@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "MainWindow.h"
 #include <QDockWidget>
 #include <QHBoxLayout>
@@ -51,7 +52,7 @@ bool canDuplicateFrame(const Document& document, const Layer& target) {
 void MainWindow::setupGifTimeline() {
     gifTimer_ = new QTimer(this);
     gifTimer_->setSingleShot(true);
-    gifTimeline_ = new QDockWidget("GIF frames", this);
+    gifTimeline_ = new QDockWidget(compositor::ui::localized("GIF frames"), this);
     gifTimeline_->setObjectName("gifTimelineDock");
     gifTimeline_->setFeatures(QDockWidget::NoDockWidgetFeatures);
     auto* contents = new QWidget(gifTimeline_);
@@ -66,14 +67,14 @@ void MainWindow::setupGifTimeline() {
     gifPlay_ = button("Play", "gifPlay", "Play or pause GIF");
     gifDuplicate_ = button("Duplicate", "gifDuplicate", "Duplicate selected GIF frame");
     gifDelete_ = button("Delete", "gifDelete", "Delete selected GIF frame");
-    controls->addWidget(new QLabel("Frame delay:", contents));
+    controls->addWidget(new QLabel(compositor::ui::localized("Frame delay:"), contents));
     gifDelay_ = new QSpinBox(contents); gifDelay_->setObjectName("gifFrameDelay");
-    gifDelay_->setAccessibleName("Selected GIF frame delay");
+    gifDelay_->setAccessibleName(compositor::ui::localized("Selected GIF frame delay"));
     gifDelay_->setRange(0, 655350); gifDelay_->setSuffix(" ms");
     gifDelay_->setKeyboardTracking(false); controls->addWidget(gifDelay_); controls->addStretch();
     layout->addLayout(controls);
     gifFrames_ = new QListWidget(contents); gifFrames_->setObjectName("gifFrameList");
-    gifFrames_->setAccessibleName("GIF frames"); gifFrames_->setViewMode(QListView::IconMode);
+    gifFrames_->setAccessibleName(compositor::ui::localized("GIF frames")); gifFrames_->setViewMode(QListView::IconMode);
     gifFrames_->setFlow(QListView::LeftToRight); gifFrames_->setWrapping(false);
     gifFrames_->setMovement(QListView::Static); gifFrames_->setIconSize({48, 48});
     gifFrames_->setResizeMode(QListView::Adjust); gifFrames_->setFixedHeight(110);
@@ -107,7 +108,7 @@ void MainWindow::setupGifTimeline() {
         stopGifPlayback(); auto* layer = active();
         if (!canEditLayers() || !layer || !layer->animation || !current() || !current()->document) return;
         if (!canDuplicateFrame(*current()->document, *layer)) {
-            statusBar()->showMessage("Duplicating this frame would exceed the project image limit.", 5000); return;
+            statusBar()->showMessage(compositor::ui::localized("Duplicating this frame would exceed the project image limit."), 5000); return;
         }
         edit("Duplicate GIF Frame", [this](Document&) {
             auto* l = active(); auto& animation = *l->animation; const auto index = animation.selectedFrame;
@@ -141,7 +142,7 @@ void MainWindow::setupGifTimeline() {
 void MainWindow::stopGifPlayback() {
     if (gifTimer_) gifTimer_->stop();
     gifPlaybackProject_ = nullptr; gifPlaybackLayer_.clear();
-    if (gifPlay_) gifPlay_->setText("Play");
+    if (gifPlay_) gifPlay_->setText(compositor::ui::localized("Play"));
 }
 
 void MainWindow::selectGifFrame(size_t index) {
@@ -169,8 +170,8 @@ void MainWindow::refreshGifTimeline() {
     if (rebuild) {
         QSignalBlocker block(gifFrames_); gifFrames_->clear();
         for (size_t i = 0; i < animation.frames.size(); ++i) {
-            auto* item = new QListWidgetItem(frameIcon(animation.frames[i].raster), QString("%1\n%2 ms").arg(i + 1).arg(animation.frames[i].delayMs), gifFrames_);
-            item->setToolTip(QString("Frame %1 · %2 ms").arg(i + 1).arg(animation.frames[i].delayMs));
+            auto* item = new QListWidgetItem(frameIcon(animation.frames[i].raster), compositor::ui::localized("%1\n%2 ms").arg(i + 1).arg(animation.frames[i].delayMs), gifFrames_);
+            item->setToolTip(compositor::ui::localized("Frame %1 · %2 ms").arg(i + 1).arg(animation.frames[i].delayMs));
         }
         gifShownLayer_ = layer->id; gifShownFrames_ = animation.frames;
     }

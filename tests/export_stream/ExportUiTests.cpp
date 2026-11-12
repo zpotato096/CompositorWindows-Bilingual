@@ -40,7 +40,24 @@ int main(int argc,char**argv){
     QApplication::setAttribute(Qt::AA_DontUseNativeDialogs);QApplication app(argc,argv);QTemporaryDir settings;
     QCoreApplication::setOrganizationName("CompositorExportTests");QCoreApplication::setApplicationName("IsolatedExportUi");
     QSettings::setDefaultFormat(QSettings::IniFormat);QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,settings.path());
-    int passed=0,failed=0;auto test=[&](const char* name,const std::function<void()>& run){try{run();++passed;std::cout<<"PASS "<<name<<'\n';}catch(const std::exception&error){++failed;std::cout<<"FAIL "<<name<<": "<<error.what()<<'\n';}};
+    int passed=0,failed=0;auto test=[&](const char* name,const std::function<void()>& run){QSettings().remove("imageExportFormat");try{run();++passed;std::cout<<"PASS "<<name<<'\n';}catch(const std::exception&error){++failed;std::cout<<"FAIL "<<name<<": "<<error.what()<<'\n';}};
+    test("remembered_export_format",[]{
+        QTemporaryDir output;MainWindow window(true);window.addProject(blank(24,24));
+        window.setProperty("testNativeSavePath",output.filePath("remember.jpg"));
+        drive(window,[&]{
+            auto* dialog=window.findChild<QDialog*>("imageExportDialog");if(!dialog)return;
+            auto* format=control<QComboBox>(dialog,"exportFormat");
+            if(format->currentIndex()!=1){format->setCurrentIndex(1);return;}
+            auto* save=control<QDialogButtonBox>(dialog,"exportButtons")->button(QDialogButtonBox::Save);
+            if(save->isEnabled())save->click();
+        });
+        require(QFileInfo::exists(output.filePath("remember.jpg")),"JPEG was not exported");
+        drive(window,[&]{
+            auto* dialog=window.findChild<QDialog*>("imageExportDialog");if(!dialog)return;
+            require(control<QComboBox>(dialog,"exportFormat")->currentIndex()==1,"Saved JPEG format not restored");
+            control<QDialogButtonBox>(dialog,"exportButtons")->button(QDialogButtonBox::Cancel)->click();
+        });
+    });
     test("channel_pack_cancel",[]{MainWindow window(true);auto& project=window.addProject(blank(32,32));const auto before=project.document;int stage=0;drive(window,[&]{auto* dialog=window.findChild<QDialog*>("imageExportDialog");if(!dialog)return;auto* format=control<QComboBox>(dialog,"exportFormat");auto* buttons=control<QDialogButtonBox>(dialog,"exportButtons");if(stage==0){format->setCurrentIndex(format->findText("Channel Pack"));control<QComboBox>(dialog,"exportChannelRed")->setCurrentIndex(1);stage=1;}else if(stage==1&&buttons->button(QDialogButtonBox::Save)->isEnabled()){require(dialog->property("readyExportPath").toString().endsWith(".png"),"Channel Pack did not prepare PNG");stage=2;buttons->button(QDialogButtonBox::Cancel)->click();}});require(stage==2&&project.document==before&&!project.projectBusy&&project.history.undoCount()==0,"Channel Pack cancel changed project");});
     test("oversized_preflight",[]{MainWindow window(true);auto&project=window.addProject(blank(30000,30000));const auto before=project.document;bool message=false;Raster::resetMaterializationCount();drive(window,[&]{require(!window.findChild<QDialog*>("imageExportDialog"),"Oversized export opened renderer dialog");for(auto*box:window.findChildren<QMessageBox*>()){require(box->text().contains("100 megapixels"),"Oversized export error lost source limit");message=true;box->accept();}});require(message&&project.document==before&&!project.projectBusy&&project.history.undoCount()==0&&Raster::materializationCount()==0,"Oversized export changed project or allocated raster");});
     test("cancel_active_worker",[]{MainWindow window(true);auto&project=window.addProject(blank(10000,10000));const auto before=project.document;bool cancelled=false;int events=0;Raster::resetMaterializationCount();drive(window,[&]{auto*dialog=window.findChild<QDialog*>("imageExportDialog");if(!dialog)return;++events;require(project.projectBusy,"Project editable during export");auto*label=control<QLabel>(dialog,"exportEncodedSize");if(label->text().startsWith("Encoding")&&dialog->property("readyExportPath").toString().isEmpty()){cancelled=true;control<QDialogButtonBox>(dialog,"exportButtons")->button(QDialogButtonBox::Cancel)->click();}});require(cancelled&&events>2&&!project.projectBusy&&project.document==before&&project.history.undoCount()==0&&Raster::materializationCount()==0,"Worker cancellation changed project or blocked GUI");});

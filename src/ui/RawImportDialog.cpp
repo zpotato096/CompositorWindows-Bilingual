@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "RawImportDialog.h"
 #include "PropertyControls.h"
 #include <QCheckBox>
@@ -47,9 +48,9 @@ void RawImportDialog::reject() {
 
 void RawImportDialog::build() {
     auto* root = new QHBoxLayout(this);
-    preview_ = new QLabel("Rendering preview…");
+    preview_ = new QLabel(compositor::ui::localized("Rendering preview…"));
     preview_->setObjectName("rawPreview");
-    preview_->setAccessibleName("RAW preview");
+    preview_->setAccessibleName(compositor::ui::localized("RAW preview"));
     preview_->setAlignment(Qt::AlignCenter);
     preview_->setFrameShape(QFrame::StyledPanel);
     preview_->setMinimumSize(640, 420);
@@ -81,10 +82,10 @@ void RawImportDialog::build() {
     tint_->setRange(kTintMin, kTintMax);
     noise_->setRange(kNoiseMin, kNoiseMax);
 
-    lensCorrection_ = new QCheckBox("Lens correction");
+    lensCorrection_ = new QCheckBox(compositor::ui::localized("Lens correction"));
     lensCorrection_->setObjectName("rawLensCorrection");
     lensCorrection_->setEnabled(false);
-    lensCorrection_->setToolTip("Unavailable: the LibRaw decoder used here applies no lens profile.");
+    lensCorrection_->setToolTip(compositor::ui::localized("Unavailable: the LibRaw decoder used here applies no lens profile."));
     form->addRow(lensCorrection_);
 
     explanation_ = new QLabel;
@@ -98,16 +99,16 @@ void RawImportDialog::build() {
     panel->addStretch(1);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel);
-    importButton_ = new QPushButton("Import");
+    importButton_ = new QPushButton(compositor::ui::localized("Import"));
     importButton_->setObjectName("rawImportButton");
     importButton_->setEnabled(false);
     importButton_->setDefault(true);
     buttons->addButton(importButton_, QDialogButtonBox::AcceptRole);
-    cameraRawButton_ = new QPushButton("Camera Raw…");
+    cameraRawButton_ = new QPushButton(compositor::ui::localized("Camera Raw…"));
     cameraRawButton_->setObjectName("rawCameraRawButton");
     cameraRawButton_->setToolTip(cameraRawAvailable_ ? "Import, then open the Camera Raw Filter" : "Only one image per batch can open Camera Raw. An earlier image was already selected.");
     if (!cameraRawAvailable_) {
-        auto* notice = new QLabel("Camera Raw is already selected for another image in this batch. You can import this image normally.");
+        auto* notice = new QLabel(compositor::ui::localized("Camera Raw is already selected for another image in this batch. You can import this image normally."));
         notice->setObjectName("rawCameraRawBatchNotice");
         notice->setWordWrap(true);
         panel->addWidget(notice);

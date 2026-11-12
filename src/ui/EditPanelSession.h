@@ -19,6 +19,7 @@ struct EditPanelResult {
     std::function<Layer(const Layer&)> mergeLayer;
     // Structural filter results are inserted into the current document.
     std::vector<Layer> insertAfterTarget;
+    std::string insertionAction;
 };
 struct EditPanelHost {
     QPointer<QWidget> canvas;

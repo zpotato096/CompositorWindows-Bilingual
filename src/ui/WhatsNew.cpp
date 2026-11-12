@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "WhatsNew.h"
 #include "MainWindow.h"
 #include "ImportActions.h"
@@ -83,7 +84,7 @@ void acknowledgeReleaseNotes(QSettings& settings,const update::Version& installe
 
 QDialog* openWhatsNewDialog(QWidget* parent,const QString& version,const ReleaseNotes& notes){
     auto* dialog=new QDialog(parent);dialog->setObjectName("whatsNewDialog");
-    dialog->setWindowTitle("What's New");dialog->setWindowModality(Qt::WindowModal);
+    dialog->setWindowTitle(compositor::ui::localized("What's New"));dialog->setWindowModality(Qt::WindowModal);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowFlag(Qt::WindowContextHelpButtonHint,false);
     dialog->setWindowFlag(Qt::WindowCloseButtonHint,true);
@@ -95,11 +96,11 @@ QDialog* openWhatsNewDialog(QWidget* parent,const QString& version,const Release
         QPushButton#whatsNewContinue { min-width:110px; padding:8px 18px; }
     )");
     auto* layout=new QVBoxLayout(dialog);layout->setContentsMargins(24,22,24,20);layout->setSpacing(12);
-    auto* heading=new QLabel("What's New");heading->setObjectName("whatsNewHeading");
+    auto* heading=new QLabel(compositor::ui::localized("What's New"));heading->setObjectName("whatsNewHeading");
     auto* subtitle=new QLabel(QString("Compositor Windows %1").arg(version));subtitle->setObjectName("whatsNewVersion");
     layout->addWidget(heading);layout->addWidget(subtitle);
     auto* content=new QTextBrowser;content->setObjectName("whatsNewContent");
-    content->setAccessibleName("Release notes");content->setOpenExternalLinks(true);
+    content->setAccessibleName(compositor::ui::localized("Release notes"));content->setOpenExternalLinks(true);
     content->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     content->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
     content->setMinimumSize(0,0);
@@ -108,7 +109,7 @@ QDialog* openWhatsNewDialog(QWidget* parent,const QString& version,const Release
     append("New features",notes.features);append("Improvements",notes.improvements);append("Fixes",notes.fixes);
     content->setMarkdown(markdown);layout->addWidget(content,1);
     auto* buttons=new QHBoxLayout;buttons->addStretch();
-    auto* proceed=new QPushButton("Continue");proceed->setObjectName("whatsNewContinue");proceed->setDefault(true);
+    auto* proceed=new QPushButton(compositor::ui::localized("Continue"));proceed->setObjectName("whatsNewContinue");proceed->setDefault(true);
     buttons->addWidget(proceed);layout->addLayout(buttons);
     QObject::connect(proceed,&QPushButton::clicked,dialog,&QDialog::accept);
 

@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "CommandPalette.h"
 #include <QApplication>
 #include <QColor>
@@ -43,7 +44,7 @@ CommandPalette::CommandPalette(QWidget* host,CommandRegistry& registry,QWidget* 
     layout->setSpacing(8);
     search_=new QLineEdit(this);
     search_->setObjectName("commandPaletteSearch");
-    search_->setPlaceholderText("Search commands and tools");
+    search_->setPlaceholderText(compositor::ui::localized("Search commands and tools"));
     search_->setClearButtonEnabled(true);
     results_=new QListWidget(this);
     results_->setObjectName("commandPaletteList");

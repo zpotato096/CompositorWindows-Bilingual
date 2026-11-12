@@ -1,0 +1,6 @@
+DepthMini was published by Robbie Tilton in the Compositor project.
+The original Core ML graph and weights come from https://github.com/robbietilton/Compositor/releases/tag/depth-model-1 .
+The upstream release identifies DepthMini as distilled from Depth Anything V2 Small (Apache-2.0).
+The Compositor source also credits the torchvision MobileNetV3 initialization (BSD 3-Clause).
+The ONNX conversion expands the upstream palettes and uses float32 CPU inference.
+Original model assets and conversion source accompany this bundle.

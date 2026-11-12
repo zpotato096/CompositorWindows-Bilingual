@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "MainWindow.h"
 #include "PropertyControls.h"
 #include "WrappingToolOptions.h"
@@ -37,14 +38,14 @@ void MainWindow::applyRememberedBrushPressure(graphics::BrushSessionSettings& se
 void MainWindow::setupBrushControls(){
     auto*bar=addToolBar("Brush Options");bar->setObjectName("brushOptions");
     auto* options=new ui::WrappingToolOptions;options->setObjectName("brushOptionsContents");bar->addWidget(options);
-    target_=new QComboBox;target_->addItems({"Image","Mask"});target_->setAccessibleName("Editing target");options->addControl(target_);connect(target_,&QComboBox::currentIndexChanged,this,[this](int i){
+    target_=new QComboBox;target_->addItems({"Image","Mask"});target_->setAccessibleName(compositor::ui::localized("Editing target"));options->addControl(target_);connect(target_,&QComboBox::currentIndexChanged,this,[this](int i){
         if(refreshing_)return;
         if(auto* project=current();project&&project->document&&active())selectLayerTarget(project->active,i==1);
         // Rejected busy/stroke or stale callbacks must show the actual target.
         if(target_){QSignalBlocker block(target_);target_->setCurrentIndex(current()&&current()->maskSelected?1:0);}
         refreshBrushControls();
     });
-    auto*maskWhite=new QCheckBox("Paint mask white");maskWhite->setObjectName("paintMaskWhite");maskWhite->setChecked(maskPaintWhite_);options->addControl(maskWhite);connect(maskWhite,&QCheckBox::toggled,this,[this](bool v){maskPaintWhite_=v;refreshPaletteControls();});
+    auto*maskWhite=new QCheckBox(compositor::ui::localized("Paint mask white"));maskWhite->setObjectName("paintMaskWhite");maskWhite->setChecked(maskPaintWhite_);options->addControl(maskWhite);connect(maskWhite,&QCheckBox::toggled,this,[this](bool v){maskPaintWhite_=v;refreshPaletteControls();});
     auto* modes=new QButtonGroup(this);modes->setExclusive(true);
     std::array<QToolButton*,2> modeButtons{};
     for(bool erase:{false,true}){auto* button=new QToolButton;modeButtons[size_t(erase)]=button;button->setText(erase?"Erase":"Paint");button->setAccessibleName(erase?"Erase":"Paint");button->setObjectName(erase?"brushModeErase":"brushModePaint");button->setCheckable(true);modes->addButton(button);connect(button,&QToolButton::clicked,this,[this,erase]{selectTool(erase?Tool::Eraser:Tool::Brush);refreshBrushControls();});}
@@ -53,7 +54,7 @@ void MainWindow::setupBrushControls(){
     auto pressureToggle=[&](const char* name,const char* label,const char* key,bool graphics::BrushSessionSettings::*setting){
         auto* button=new QToolButton;
         button->setObjectName(name);
-        button->setText("Pressure");
+        button->setText(compositor::ui::localized("Pressure"));
         button->setAccessibleName(label);
         button->setToolTip(label);
         button->setCheckable(true);
@@ -70,11 +71,11 @@ void MainWindow::setupBrushControls(){
     };
     auto* sizePressure=pressureToggle(pressureSizeControl,"Pen pressure for brush size",pressureSizeKey,&graphics::BrushSessionSettings::pressureSize);
     auto* opacityPressure=pressureToggle(pressureOpacityControl,"Pen pressure for brush opacity",pressureOpacityKey,&graphics::BrushSessionSettings::pressureOpacity);
-    auto*size=new ui::PropertyNumber;size->setDecimals(0);size->setRange(1,2000);size->setValue(40);size->setAccessibleName("Brush diameter");options->addGroup({new QLabel("Size"),size,sizePressure});
-    auto*hardness=new ui::PropertyNumber;hardness->setDecimals(0);hardness->setRange(0,100);hardness->setValue(100);hardness->setSuffix("%");options->addGroup({new QLabel("Hardness"),slider(0),hardness});
-    auto*opacity=new ui::PropertyNumber;opacity->setDecimals(0);opacity->setRange(1,100);opacity->setValue(100);opacity->setSuffix("%");options->addGroup({new QLabel("Opacity"),slider(1),opacity,opacityPressure});
+    auto*size=new ui::PropertyNumber;size->setDecimals(0);size->setRange(1,2000);size->setValue(40);size->setAccessibleName(compositor::ui::localized("Brush diameter"));options->addGroup({new QLabel(compositor::ui::localized("Size")),size,sizePressure});
+    auto*hardness=new ui::PropertyNumber;hardness->setDecimals(0);hardness->setRange(0,100);hardness->setValue(100);hardness->setSuffix("%");options->addGroup({new QLabel(compositor::ui::localized("Hardness")),slider(0),hardness});
+    auto*opacity=new ui::PropertyNumber;opacity->setDecimals(0);opacity->setRange(1,100);opacity->setValue(100);opacity->setSuffix("%");options->addGroup({new QLabel(compositor::ui::localized("Opacity")),slider(1),opacity,opacityPressure});
     for(auto* number:{size,hardness,opacity})number->releaseFocus=[this]{if(canvas())canvas()->setFocus();};
-    hardness->setAccessibleName("Brush hardness");opacity->setAccessibleName("Brush opacity");
+    hardness->setAccessibleName(compositor::ui::localized("Brush hardness"));opacity->setAccessibleName(compositor::ui::localized("Brush opacity"));
     brushTip_={size,hardness,opacity};
     connect(size,&QDoubleSpinBox::valueChanged,this,[this](double v){if(!refreshing_&&!stroke_){brushSettings_.radius=v/2;refreshBrushControls();}});
     connect(hardness,&QDoubleSpinBox::valueChanged,this,[this](double v){if(!refreshing_&&!stroke_){brushSettings_.hardness=v/100;refreshBrushControls();}});

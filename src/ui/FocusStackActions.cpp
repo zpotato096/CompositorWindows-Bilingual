@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "MainWindow.h"
 #include "FocusStackJob.h"
 #include <QMessageBox>
@@ -21,12 +22,12 @@ FocusStackOutput chooseFocusStackOutput(QWidget* parent){
     const auto injected=parent->property("testFocusStackOutput");
     if(injected.isValid()){const auto value=injected.toString();
         return value=="layer"?FocusStackOutput::NewLayer:value=="document"?FocusStackOutput::NewDocument:FocusStackOutput::Cancel;}
-    QMessageBox message(QMessageBox::Question,"Focus Stack","Add the focus-stacked result as a new layer in this document, or open it as a new document?",QMessageBox::NoButton,parent);
+    QMessageBox message(QMessageBox::Question,compositor::ui::localized("Focus Stack"),compositor::ui::localized("Add the focus-stacked result as a new layer in this document, or open it as a new document?"),QMessageBox::NoButton,parent);
     message.setObjectName("focusStackOutput");
     // Already styled, so the chrome handler keeps Qt's layout; otherwise the question is clipped (KNOWN-ISSUES: Dialog chrome).
     message.setProperty("studioChrome",true);
-    auto* layer=message.addButton("New Layer",QMessageBox::AcceptRole);layer->setObjectName("focusStackNewLayer");
-    auto* document=message.addButton("New Document",QMessageBox::AcceptRole);document->setObjectName("focusStackNewDocument");
+    auto* layer=message.addButton(compositor::ui::localized("New Layer"),QMessageBox::AcceptRole);layer->setObjectName("focusStackNewLayer");
+    auto* document=message.addButton(compositor::ui::localized("New Document"),QMessageBox::AcceptRole);document->setObjectName("focusStackNewDocument");
     message.addButton(QMessageBox::Cancel);
     message.setDefaultButton(layer);message.exec();
     return message.clickedButton()==layer?FocusStackOutput::NewLayer:message.clickedButton()==document?FocusStackOutput::NewDocument:FocusStackOutput::Cancel;
@@ -34,7 +35,7 @@ FocusStackOutput chooseFocusStackOutput(QWidget* parent){
 }
 void MainWindow::focusStackSelectedImages(const QStringList& paths){
     if(paths.isEmpty())return;
-    if(ui::FocusStackJob::find(this)){statusBar()->showMessage("A focus stack is already running",5000);return;}
+    if(ui::FocusStackJob::find(this)){statusBar()->showMessage(compositor::ui::localized("A focus stack is already running"),5000);return;}
     if(paths.size()<2){showFocusStackError(this,"Select at least two images to focus stack.");return;}
     std::vector<std::filesystem::path> files;for(const auto& path:paths)files.push_back(std::filesystem::path(path.toStdWString()));
     auto* owner=current();
@@ -57,7 +58,7 @@ void MainWindow::focusStackSelectedImages(const QStringList& paths){
         return;
     }
     // The project can become busy (save, import) while the picker or output dialog is open.
-    if(owner->projectBusy||owner->importing){statusBar()->showMessage("The project is busy; focus stack it again when the current operation finishes",5000);return;}
+    if(owner->projectBusy||owner->importing){statusBar()->showMessage(compositor::ui::localized("The project is busy; focus stack it again when the current operation finishes"),5000);return;}
     const auto before=owner->document;const auto beforeActive=owner->active;
     QPointer<NativeCanvas> token=owner->canvas;
     host.settled=[this,owner,token]{if(!token)return;owner->projectBusy=false;refresh(false,false);};

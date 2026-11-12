@@ -108,7 +108,9 @@ The existing staged save and recovery journal include this asset. Proof Colors o
 
 Windows saves an animated raster layer using its own `windowsGif` extension and raises the project version to 18. This prevents older Windows builds, which support at most version 17, from opening and silently dropping the animation. A document without animated layers keeps the lowest version that represents it. The extension is Windows-specific; exchange with the Mac application has not been verified.
 
-`windowsGif` contains `selectedFrame` (zero-based) and a nonempty `frames` array of up to 4096 entries, each with `imageFile` and an integer `delayMs` from 0 to 655350. The selected frame uses the layer's normal `<UUID>.png` asset; other frames use `<UUID>.frame-<index>.png`. The selected image is the layer's current editable pixels; all frames share its transform, mask, opacity and effects. Each file is an 8-bit PNG. The normal cumulative image-pixel budget counts every frame once. Assets and indices are validated before the project is installed. Projects using the distinct Mac `gif` extension remain explicitly unsupported rather than silently discarding it.
+`windowsGif` contains `selectedFrame` (zero-based) and a nonempty `frames` array of up to 4096 entries, each with `imageFile` and an integer `delayMs` from 0 to 655350. The selected frame uses the layer's normal `<UUID>.png` asset; other frames use `<UUID>.frame-<index>.png`. The selected image is the layer's current editable pixels; all frames share its transform, mask, opacity and effects. Each file is an 8-bit PNG. The normal cumulative image-pixel budget counts every frame once. Assets and indices are validated before the project is installed.
+
+The Mac reader in the continuation build also accepts `gif` records in v17–v21 and the v27 branch format. It materializes the effective frame order, timing, edited frame PNGs, and optional affine frame geometry into the Windows timeline. **Save Mac-Compatible Copy** writes v21, an immutable `<UUID>.gif` backing file, and exact PNG overrides for the editable frames. Mac-compatible copies clamp delays below 20 ms to 20 ms, the minimum in the Mac format. A Windows-attached CMYK proof profile prevents making this copy. Native Windows saves keep `windowsGif` and the existing version rules.
 
 ## Windows Vignette adjustment layers (version 20)
 
@@ -119,6 +121,10 @@ The kind or nested object requires Windows version 20, including when the adjust
 ## Windows Tonal Contrast adjustment layers (version 21)
 
 A `Tonal Contrast` adjustment requires `filterLayerSettings.tonal` with finite numeric fields `amount` (0–100), `radius` (1–100 document pixels), and `shadows`, `midtones`, and `highlights` (−100–100). New layers use 50, 16, 40, 60, and 30 respectively. The kind or nested object requires Windows version 21; older projects remain readable. The existing destructive filter keeps its separate settings and behavior. Windows version 21 is independent of the Mac format and exchange has not been verified.
+
+## Sharpen and Reduce Noise adjustment layers
+
+Sharpen layers use `kind: "Sharpen"` and the Mac v19 `filterLayerSettings.sharpen` fields `amount` (0–300) and `radius` (0.1–20). Reduce Noise layers use `kind: "Reduce Noise"` and the Mac v21 `filterLayerSettings.reduceNoise` fields `strength`, `details` and `color` (each 0–100). Windows writes at least v19 or v21 respectively when these layers are present. A document that also uses a Windows extension may need a higher version.
 
 ## Windows Lens Effects adjustment layers (version 22)
 

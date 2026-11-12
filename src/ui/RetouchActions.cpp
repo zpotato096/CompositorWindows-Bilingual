@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "MainWindow.h"
 #include "PropertyControls.h"
 #include "WrappingToolOptions.h"
@@ -64,13 +65,13 @@ void MainWindow::setupRetouchActions() {
     auto* options=new ui::WrappingToolOptions;options->setObjectName("retouchOptionsContents");retouchBar_->addWidget(options);
     auto* family=new QLabel;family->setObjectName("retouchFamily");options->addControl(family);
     healingModes_=new QComboBox;
-    healingModes_->setObjectName("retouchHealingMode");healingModes_->setAccessibleName("Healing mode");
+    healingModes_->setObjectName("retouchHealingMode");healingModes_->setAccessibleName(compositor::ui::localized("Healing mode"));
     healingModes_->addItems({"Content-Aware","Create Texture","Proximity Match"});options->addControl(healingModes_);
     blurModes_=new QComboBox;
-    blurModes_->setObjectName("retouchSmearMode");blurModes_->setAccessibleName("Smear mode");
+    blurModes_->setObjectName("retouchSmearMode");blurModes_->setAccessibleName(compositor::ui::localized("Smear mode"));
     blurModes_->addItems({"Liquify","Blur","Smudge"});options->addControl(blurModes_);
-    cloneAligned_=new QCheckBox("Aligned");cloneAligned_->setObjectName("retouchAligned");cloneAligned_->setChecked(true);options->addControl(cloneAligned_);
-    cloneAllLayers_=new QCheckBox("Sample All Layers");cloneAllLayers_->setObjectName("retouchAllLayers");options->addControl(cloneAllLayers_);
+    cloneAligned_=new QCheckBox(compositor::ui::localized("Aligned"));cloneAligned_->setObjectName("retouchAligned");cloneAligned_->setChecked(true);options->addControl(cloneAligned_);
+    cloneAllLayers_=new QCheckBox(compositor::ui::localized("Sample All Layers"));cloneAllLayers_->setObjectName("retouchAllLayers");options->addControl(cloneAllLayers_);
     const char* labels[]{" Size "," Hardness "," Opacity "};
     const char* names[]{"Retouch diameter","Retouch hardness","Retouch opacity"};
     const char* objects[]{"retouchDiameter","retouchHardness","retouchOpacity"};
@@ -157,13 +158,13 @@ bool MainWindow::beginRetouch(Point point,Qt::KeyboardModifiers modifiers) {
     if(retouch_)cancelRetouch();
     // Source sampling is a pointer action, even on an ineligible paint target.
     if(tool_==Tool::CloneStamp&&modifiers.testFlag(Qt::AltModifier)) {
-        try{project->cloneAlignment.setSource(point);statusBar()->showMessage(QString("Clone source: %1, %2").arg(point.x,0,'f',1).arg(point.y,0,'f',1));}
+        try{project->cloneAlignment.setSource(point);statusBar()->showMessage(compositor::ui::localized("Clone source: %1, %2").arg(point.x,0,'f',1).arg(point.y,0,'f',1));}
         catch(const std::exception& error){statusBar()->showMessage(error.what());}
         return true;
     }
     auto* layer=active();
     if(!layer||layerSelection().ids.size()!=1)return true;
-    if(!project->maskSelected&&layer->deep&&layer->deep->isHdr()){statusBar()->showMessage("Use Layer > Convert HDR to 16-Bit before retouching");return true;}
+    if(!project->maskSelected&&layer->deep&&layer->deep->isHdr()){statusBar()->showMessage(compositor::ui::localized("Use Layer > Convert HDR to 16-Bit before retouching"));return true;}
     const auto entries=layers::entries(*project->document);
     if(std::none_of(entries.begin(),entries.end(),[&](const layers::Entry& entry){return entry.id==layer->id&&entry.visible;}))return true;
     const auto& selected=project->document->selection;
@@ -174,20 +175,20 @@ bool MainWindow::beginRetouch(Point point,Qt::KeyboardModifiers modifiers) {
     else {settings.mode=healingMode_;settings.radius=brushSettings_.radius;settings.hardness=brushSettings_.hardness;settings.opacity=brushSettings_.opacity;settings.healingSeed=QRandomGenerator::global()->generate();}
     const bool mask=project->maskSelected;
     if(mask) {
-        if(settings.mode!=retouch::Mode::Blur){statusBar()->showMessage("Use Blur to retouch a mask. Clone, Healing, Smudge and Liquify edit image pixels.");return true;}
+        if(settings.mode!=retouch::Mode::Blur){statusBar()->showMessage(compositor::ui::localized("Use Blur to retouch a mask. Clone, Healing, Smudge and Liquify edit image pixels."));return true;}
         if(!layer->mask||!layer->mask->enabled||!layer->mask->raster)return true;
     } else if(layer->group||!layer->adjustmentJson.empty()||(!layer->raster&&(settings.mode==retouch::Mode::Blur||isWarp(settings.mode))))return true;
     const Point start=modifiers.testFlag(Qt::ShiftModifier)&&lastBrushPoint_&&lastBrushLayer_==layer->id&&lastBrushMask_==mask?*lastBrushPoint_:point;
     retouch::Sources sources;
     if(settings.mode==retouch::Mode::Clone) {
         sources.cloneOffset=project->cloneAlignment.strokeOffset(start);
-        if(!sources.cloneOffset){statusBar()->showMessage("Alt-click where Clone Stamp should copy from first.");return true;}
+        if(!sources.cloneOffset){statusBar()->showMessage(compositor::ui::localized("Alt-click where Clone Stamp should copy from first."));return true;}
     }
     const bool heal=tool_==Tool::SpotHealing;
     const bool huge=uint64_t(project->document->width)*project->document->height>=25000000;
     const bool convert=!mask&&layer->deep&&layer->deep->valid()&&!layer->deep->isHdr()&&(heal||huge);
     if(convert){
-        QMessageBox confirmation(QMessageBox::Question,"Convert to 8-Bit",heal?"Spot Healing uses an 8-bit kernel. Convert this 16-bit layer to 8-bit before retouching? This conversion can be undone.":"This canvas is too large for 16-bit retouch working buffers. Convert this layer to 8-bit first? This conversion can be undone.",QMessageBox::Ok|QMessageBox::Cancel,this);
+        QMessageBox confirmation(QMessageBox::Question,compositor::ui::localized("Convert to 8-Bit"),heal?"Spot Healing uses an 8-bit kernel. Convert this 16-bit layer to 8-bit before retouching? This conversion can be undone.":"This canvas is too large for 16-bit retouch working buffers. Convert this layer to 8-bit first? This conversion can be undone.",QMessageBox::Ok|QMessageBox::Cancel,this);
         confirmation.setProperty("studioChrome",true);confirmation.setDefaultButton(QMessageBox::Cancel);
         if(confirmation.exec()!=QMessageBox::Ok)return true;
         const auto id=layer->id;

@@ -4,6 +4,10 @@ The preview is a Windows port of [Compositor by Robbie Tilton](https://github.co
 
 The source ZIP accompanying each download is identical to `sources/CompositorWindows-source.zip` inside its runtime payload. It contains production code, native test sources and frozen reference code, build/package scripts, dependency locks/notices and user/build instructions. Generated results, dumps, compiled binaries, development signing keys and historical coordination reports are excluded. The demo images, reusable project, export and generator are supplied in a separate demo ZIP; recording files are separate release assets. The package manifest records the source ZIP's SHA256 and source revision; the public release identifies the corresponding commit/tag.
 
+For the bilingual continuation build, retain `models/depthmini.onnx` and `imageformats/qwebp.dll` from the corresponding portable folder. Both are runtime assets. The DepthMini conversion script takes the official `depth-model-1` assets, the coremltools 9.0 schema wheel, and an output path. Its build-time Python dependencies are NumPy, protobuf, and ONNX. The original model assets, model notices, and Qt Image Formats source are included in the portable bundle. Do not use a WebP plugin from a different Qt version.
+
+The `bilingual_port` CTest group covers the language selector, new filters, project watcher, Mac-compatible copies, WebP import, and individual PNG exports. Copy `models/depthmini.onnx` next to the test output under `models/`, and expose the portable folder's Qt plugins and libraries to the test process.
+
 Use Windows 11 x64, PowerShell 7, Visual Studio 2022 C++ tools with MSVC 14.44, Windows SDK 10.0.26100.0, CMake 3.31.6 or later, and Python 3.12 for the offline-model conversion. Extract the source ZIP into an empty folder. Retain the matching portable payload, because the four recorded codec/ONNX runtime DLLs include build timestamps and do not promise byte-identical rebuilding.
 
 ```powershell

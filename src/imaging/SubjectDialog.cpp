@@ -1,3 +1,4 @@
+#include "ui/InterfaceLanguage.h"
 #include "SubjectDialog.h"
 #include "onnx_subject_provider.h"
 #include "../ui/PropertyControls.h"
@@ -26,7 +27,7 @@ namespace {
 class Preview final:public QWidget {
     QImage image_;
 public:
-    explicit Preview(QWidget* parent=nullptr):QWidget(parent){setMinimumSize(480,320);setAccessibleName("Background removal preview");}
+    explicit Preview(QWidget* parent=nullptr):QWidget(parent){setMinimumSize(480,320);setAccessibleName(compositor::ui::localized("Background removal preview"));}
     void setImage(const RgbaImage& rgba){
         QImage wrapped(rgba.pixels.data(),int(rgba.width),int(rgba.height),qsizetype(rgba.stride),QImage::Format_RGBA8888_Premultiplied);
         image_=wrapped.scaled(1200,900,Qt::KeepAspectRatio,Qt::SmoothTransformation);update();
@@ -87,7 +88,7 @@ class SubjectDialog final:public QDialog {
         if(next==Stage::Apply){cancel_->setEnabled(false);previewEnabled_->setEnabled(false);if(callbacks_.committingChanged)callbacks_.committingChanged(true);}
         auto cancellation=cancelled_;auto source=source_;auto base=base_;auto model=model_;auto parameters=settings();const bool standalone=!nonmodal_;
         auto processPreview=callbacks_.processPreview;auto processMask=callbacks_.processMask;
-        progress_->show();status_->setText(next==Stage::Infer?tr("Finding foreground…"):next==Stage::Apply?tr("Applying mask…"):tr("Updating preview…"));
+        progress_->show();status_->setText(next==Stage::Infer?compositor::ui::localized("Finding foreground…"):next==Stage::Apply?compositor::ui::localized("Applying mask…"):compositor::ui::localized("Updating preview…"));
         apply_->setEnabled(false);quality_->setEnabled(next!=Stage::Infer&&next!=Stage::Apply);advanced_->setEnabled(next!=Stage::Infer&&next!=Stage::Apply);
         watcher_.setFuture(QtConcurrent::run([source,existing,base,model,parameters,cancellation,next,standalone,processPreview,processMask]{
             Result out;ImportOptions options;options.cancelled=[cancellation]{return cancellation->load();};
@@ -103,7 +104,7 @@ class SubjectDialog final:public QDialog {
         if(closing_){retire();return;}
         if(!result.cancelled&&!result.error.isEmpty()){
             if(completed==Stage::Preview)previewReady_=false;
-            qWarning("Background removal: %s",qPrintable(result.error));status_->setText(result.error.contains("ONNX Runtime")?tr("Background removal could not load its runtime. Repair or reinstall Compositor."):result.error.contains("No foreground")?tr("No foreground subject was detected. Try an image with a more distinct subject."):tr("Background removal could not be completed. Try a smaller image or reopen the app."));
+            qWarning("Background removal: %s",qPrintable(result.error));status_->setText(result.error.contains("ONNX Runtime")?compositor::ui::localized("Background removal could not load its runtime. Repair or reinstall Compositor."):result.error.contains("No foreground")?compositor::ui::localized("No foreground subject was detected. Try an image with a more distinct subject."):compositor::ui::localized("Background removal could not be completed. Try a smaller image or reopen the app."));
             apply_->setEnabled(previewReady_);quality_->setEnabled(bool(base_));advanced_->setEnabled(bool(base_));
             if(completed==Stage::Apply){cancel_->setEnabled(true);previewEnabled_->setEnabled(true);if(callbacks_.committingChanged)callbacks_.committingChanged(false);}
         }else if(!result.cancelled){
@@ -116,14 +117,14 @@ class SubjectDialog final:public QDialog {
 public:
     SubjectDialog(QWidget* parent,const RgbaImage& source,const GrayMask* existing,const std::filesystem::path& model,const SubjectDialogOptions& options,bool nonmodal=false,SubjectDialogCallbacks callbacks={}):QDialog(parent),source_(std::make_shared<const RgbaImage>(source)),existing_(existing?std::make_shared<const GrayMask>(*existing):nullptr),model_(model),onApply_(options.onApply),callbacks_(std::move(callbacks)),nonmodal_(nonmodal){
         const auto setting=[](double value,int low,int high,int fallback){return std::isfinite(value)?int(std::lround(std::clamp(value,double(low),double(high)))):fallback;};
-        setWindowTitle(tr("Remove Background"));setObjectName("subjectPanel");setModal(!nonmodal_);resize(nonmodal_?440:760,nonmodal_?380:690);if(nonmodal_)setWindowFlags(Qt::Tool|Qt::WindowTitleHint|Qt::WindowCloseButtonHint);auto* layout=new QVBoxLayout(this);
+        setWindowTitle(compositor::ui::localized("Remove Background"));setObjectName("subjectPanel");setModal(!nonmodal_);resize(nonmodal_?440:760,nonmodal_?380:690);if(nonmodal_)setWindowFlags(Qt::Tool|Qt::WindowTitleHint|Qt::WindowCloseButtonHint);auto* layout=new QVBoxLayout(this);
         preview_=new Preview(this);preview_->setImage(source);layout->addWidget(preview_,1);
         if(nonmodal_)preview_->hide();
-        auto* qualityLayout=new QHBoxLayout;auto* qualityLabel=new QLabel(tr("Quality"),this);quality_=new QComboBox(this);quality_->setObjectName("backgroundQuality");quality_->addItems({tr("Basic"),tr("Advanced")});quality_->setCurrentIndex(options.initial.advanced?1:0);quality_->setAccessibleName(tr("Quality"));qualityLabel->setBuddy(quality_);qualityLayout->addWidget(qualityLabel);qualityLayout->addWidget(quality_);qualityLayout->addStretch();layout->addLayout(qualityLayout);
-        advanced_=new QWidget(this);auto* grid=new QGridLayout(advanced_);grid->setContentsMargins(0,0,0,0);refine_=control(grid,0,tr("Refine"),0,40,setting(options.initial.refineEdges,0,40,12),12,tr(" px"));contrast_=control(grid,1,tr("Contrast"),0,100,setting(options.initial.contrast,0,100,25),25,tr(" %"));shift_=control(grid,2,tr("Shift Edge"),-10,10,setting(options.initial.shiftEdge,-10,10,0),0,tr(" px"));advanced_->setVisible(options.initial.advanced);layout->addWidget(advanced_);
-        auto* guidance=new QLabel(tr("Works best with a distinct, opaque subject. Transparent objects, fine hair and fur may need manual mask cleanup."),this);guidance->setWordWrap(true);layout->addWidget(guidance);
+        auto* qualityLayout=new QHBoxLayout;auto* qualityLabel=new QLabel(compositor::ui::localized("Quality"),this);quality_=new QComboBox(this);quality_->setObjectName("backgroundQuality");quality_->addItems({compositor::ui::localized("Basic"),compositor::ui::localized("Advanced")});quality_->setCurrentIndex(options.initial.advanced?1:0);quality_->setAccessibleName(compositor::ui::localized("Quality"));qualityLabel->setBuddy(quality_);qualityLayout->addWidget(qualityLabel);qualityLayout->addWidget(quality_);qualityLayout->addStretch();layout->addLayout(qualityLayout);
+        advanced_=new QWidget(this);auto* grid=new QGridLayout(advanced_);grid->setContentsMargins(0,0,0,0);refine_=control(grid,0,compositor::ui::localized("Refine"),0,40,setting(options.initial.refineEdges,0,40,12),12,compositor::ui::localized(" px"));contrast_=control(grid,1,compositor::ui::localized("Contrast"),0,100,setting(options.initial.contrast,0,100,25),25,compositor::ui::localized(" %"));shift_=control(grid,2,compositor::ui::localized("Shift Edge"),-10,10,setting(options.initial.shiftEdge,-10,10,0),0,compositor::ui::localized(" px"));advanced_->setVisible(options.initial.advanced);layout->addWidget(advanced_);
+        auto* guidance=new QLabel(compositor::ui::localized("Works best with a distinct, opaque subject. Transparent objects, fine hair and fur may need manual mask cleanup."),this);guidance->setWordWrap(true);layout->addWidget(guidance);
         status_=new QLabel(this);status_->setWordWrap(true);layout->addWidget(status_);progress_=new QProgressBar(this);progress_->setRange(0,0);progress_->setTextVisible(false);layout->addWidget(progress_);
-        previewEnabled_=new QCheckBox(tr("Preview"),this);previewEnabled_->setChecked(true);previewEnabled_->setObjectName("subjectPreviewEnabled");layout->addWidget(previewEnabled_);connect(previewEnabled_,&QCheckBox::toggled,this,[this]{publish();if(!nonmodal_)preview_->setImage(previewEnabled_->isChecked()&&completedPreview_?*completedPreview_:*source_);});
+        previewEnabled_=new QCheckBox(compositor::ui::localized("Preview"),this);previewEnabled_->setChecked(true);previewEnabled_->setObjectName("subjectPreviewEnabled");layout->addWidget(previewEnabled_);connect(previewEnabled_,&QCheckBox::toggled,this,[this]{publish();if(!nonmodal_)preview_->setImage(previewEnabled_->isChecked()&&completedPreview_?*completedPreview_:*source_);});
         auto* buttons=new QDialogButtonBox(QDialogButtonBox::Apply|QDialogButtonBox::Cancel,this);apply_=buttons->button(QDialogButtonBox::Apply);cancel_=buttons->button(QDialogButtonBox::Cancel);apply_->setObjectName("applySubjectMask");apply_->setEnabled(false);layout->addWidget(buttons);
         connect(buttons,&QDialogButtonBox::rejected,this,&SubjectDialog::reject);connect(apply_,&QPushButton::clicked,this,[this]{debounce_.stop();apply_->setEnabled(false);quality_->setEnabled(false);advanced_->setEnabled(false);pending_=Stage::Apply;launch(Stage::Apply);});
         connect(quality_,&QComboBox::currentIndexChanged,this,[this](int index){advanced_->setVisible(index==1);queuePreview();});

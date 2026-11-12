@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "MainWindow.h"
 #include "KeyboardShortcutDialog.h"
 #include <QSettings>
@@ -86,7 +87,7 @@ void MainWindow::initializeCommands(){
             if(transformSession_)applyTransformSession();
         }
     });
-    commands_->setErrorHandler([this](const QString& error){QMessageBox::critical(this,"Compositor",error);});
+    commands_->setErrorHandler([this](const QString& error){QMessageBox::critical(this,"Compositor",ui::localized(error));});
     connect(QApplication::clipboard(),&QClipboard::dataChanged,this,[this]{if(commands_)commands_->refresh();});
 }
 void MainWindow::bindCommand(QAction* action,const QString& menu,const QString& label,std::function<void()> invoke){

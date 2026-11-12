@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "UpdatePanel.h"
 #include "update/ReleaseCheck.h"
 #include "update/Updater.h"
@@ -97,20 +98,20 @@ class UpdatePanel final : public QDialog {
 public:
     UpdatePanel(QWidget* parent, UpdatePanelHost host, QString directory)
         : QDialog(parent), host_(std::move(host)), directory_(std::move(directory)) {
-        setObjectName("updatePanel"); setWindowTitle("Check for Updates");
+        setObjectName("updatePanel"); setWindowTitle(compositor::ui::localized("Check for Updates"));
         setWindowModality(Qt::NonModal); setAttribute(Qt::WA_DeleteOnClose); resize(520, 260);
         auto* layout = new QVBoxLayout(this);
         information_ = new QLabel; information_->setObjectName("updateSourceInformation"); information_->setWordWrap(true); layout->addWidget(information_);
         versions_ = new QLabel; versions_->setObjectName("updateVersions"); versions_->setWordWrap(true); layout->addWidget(versions_);
-        status_ = new QLabel("Preparing update check…"); status_->setObjectName("updateStatus"); status_->setAccessibleName("Update status"); status_->setWordWrap(true); layout->addWidget(status_);
-        progressBar_ = new QProgressBar; progressBar_->setObjectName("updateProgress"); progressBar_->setAccessibleName("Update progress"); layout->addWidget(progressBar_); progressBar_->hide();
+        status_ = new QLabel(compositor::ui::localized("Preparing update check…")); status_->setObjectName("updateStatus"); status_->setAccessibleName(compositor::ui::localized("Update status")); status_->setWordWrap(true); layout->addWidget(status_);
+        progressBar_ = new QProgressBar; progressBar_->setObjectName("updateProgress"); progressBar_->setAccessibleName(compositor::ui::localized("Update progress")); layout->addWidget(progressBar_); progressBar_->hide();
         retained_ = new QLabel; retained_->setObjectName("updateRetainedVersion"); retained_->setWordWrap(true); layout->addWidget(retained_);
-        automatic_ = new QCheckBox("Check for new stable releases automatically"); automatic_->setObjectName("updateAutomatic");
+        automatic_ = new QCheckBox(compositor::ui::localized("Check for new stable releases automatically")); automatic_->setObjectName("updateAutomatic");
         { QSettings settings; automatic_->setChecked(update::automaticChecksEnabled(settings)); }
-        automatic_->setToolTip("Once a day, Compositor asks GitHub for the latest stable release. Installation stays manual.");
+        automatic_->setToolTip(compositor::ui::localized("Once a day, Compositor asks GitHub for the latest stable release. Installation stays manual."));
         connect(automatic_, &QCheckBox::toggled, this, [](bool enabled) { QSettings settings; update::setAutomaticChecksEnabled(settings, enabled); });
         layout->addWidget(automatic_);
-        releaseStatus_ = new QLabel; releaseStatus_->setObjectName("updateReleaseStatus"); releaseStatus_->setAccessibleName("Release check status"); releaseStatus_->setWordWrap(true); layout->addWidget(releaseStatus_);
+        releaseStatus_ = new QLabel; releaseStatus_->setObjectName("updateReleaseStatus"); releaseStatus_->setAccessibleName(compositor::ui::localized("Release check status")); releaseStatus_->setWordWrap(true); layout->addWidget(releaseStatus_);
         auto* row = new QHBoxLayout; layout->addLayout(row);
         releaseCheck_ = button(row, "Check for New Release", "updateReleaseCheck"); releaseCheck_->setVisible(bool(host_.checkRelease));
         connect(releaseCheck_, &QPushButton::clicked, this, [this] { checkRelease(); });
@@ -181,7 +182,7 @@ private:
     }
     void checkRelease() {
         if (!host_.checkRelease || !releaseCheck_->isEnabled()) return;
-        releaseCheck_->setEnabled(false); releaseStatus_->setText("Checking for a new stable release…");
+        releaseCheck_->setEnabled(false); releaseStatus_->setText(compositor::ui::localized("Checking for a new stable release…"));
         QPointer<UpdatePanel> alive(this);
         host_.checkRelease([alive](const QString& status) {
             if (!alive) return;
@@ -190,13 +191,13 @@ private:
     }
     void requestCancel() {
         if (!busy_) return;
-        progress_->cancelled.store(true); status_->setText("Cancelling the update operation…"); controls();
+        progress_->cancelled.store(true); status_->setText(compositor::ui::localized("Cancelling the update operation…")); controls();
     }
     void paintProgress() {
         const auto total = progress_->total.load(), done = progress_->done.load();
         if (!total) return;
         progressBar_->setRange(0, 1000); progressBar_->setValue(int(std::min<long double>(1000, static_cast<long double>(done) * 1000 / total)));
-        if (installing_ && done >= total && !progress_->cancelled.load()) status_->setText("Verifying files and testing the installed version…");
+        if (installing_ && done >= total && !progress_->cancelled.load()) status_->setText(compositor::ui::localized("Verifying files and testing the installed version…"));
     }
     void finished() {
         timer_.stop(); paintProgress(); busy_ = false; progressBar_->hide();
@@ -230,7 +231,7 @@ private:
             const bool accepted = host_.restart(configuration_.root);
             if (!alive) return;
             if (accepted) QDialog::accept();
-            else status_->setText("Restart cancelled. The installed update remains ready for the next launch.");
+            else status_->setText(compositor::ui::localized("Restart cancelled. The installed update remains ready for the next launch."));
         } catch (const std::exception& error) { if (alive) status_->setText(QString::fromUtf8(error.what())); }
     }
     UpdatePanelHost host_;

@@ -1,7 +1,12 @@
 #pragma once
 #include "subject_matte.h"
 #include <filesystem>
+#include <stdexcept>
 namespace compositor::imaging {
+class NoForegroundSubject final:public std::runtime_error {
+public:
+    NoForegroundSubject():std::runtime_error("No foreground subject was detected"){}
+};
 class OnnxSubjectProvider final:public ISubjectMaskProvider {
     struct Impl;std::unique_ptr<Impl> impl_;
     GrayMask inferImpl(const RgbaImage&,const ImportOptions&,bool requireSubject);
@@ -14,4 +19,6 @@ public:
     // Executes the real CPU graph and validates finite output without requiring a semantic subject.
     void healthCheck(const ImportOptions& = {});
 };
+// Inverse depth, normalized to [0,1], with the same grid as the source.
+std::vector<float> inferDepthMini(const std::filesystem::path&,const RgbaImage&,const ImportOptions& = {});
 }

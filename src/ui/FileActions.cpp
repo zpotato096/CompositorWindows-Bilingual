@@ -1,9 +1,11 @@
+#include "InterfaceLanguage.h"
 #include "MainWindow.h"
 #include "imaging/cmyk.h"
 #include "AppLogging.h"
 #include "PropertyControls.h"
 #include "StaWorker.h"
 #include "persistence/ProjectStore.h"
+#include "ProjectDiskWatch.h"
 #include "imaging/wic_codec.h"
 #include "imaging/heif_codec.h"
 #include "imaging/gif_codec.h"
@@ -24,6 +26,9 @@
 #include <QDialog>
 #include <QFileInfo>
 #include <QMessageBox>
+#include <QFileDialog>
+#include <QRegularExpression>
+#include <QSet>
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -76,7 +81,7 @@ namespace compositor {
 static std::filesystem::path nativePath(const QString&s){return std::filesystem::path(s.toStdWString());}
 static void reportPickerBusy(MainWindow* window){
     logging::trace("native picker ignored because another picker is active");
-    window->statusBar()->showMessage("A file picker is already open",5000);
+    window->statusBar()->showMessage(compositor::ui::localized("A file picker is already open"),5000);
 }
 namespace {
 void showPdfImportError(QWidget* owner, const QString& title, const QString& error, const char* name = "pdfImportError") {
@@ -119,7 +124,7 @@ template<class Load> bool loadProjectBatch(QWidget* owner,const QStringList& pat
     bool opened=false;
     for(const auto& path:paths){
         try{opened=load(path)||opened;}
-        catch(const std::exception& error){QMessageBox message(QMessageBox::Critical,"Open Compositor Project",QString("Could not open %1.\n\n%2").arg(QDir::toNativeSeparators(path),QString::fromUtf8(error.what())),QMessageBox::Ok,owner);message.setObjectName("projectOpenError");message.exec();}
+        catch(const std::exception& error){QMessageBox message(QMessageBox::Critical,compositor::ui::localized("Open Compositor Project"),compositor::ui::localized("Could not open %1.\n\n%2").arg(QDir::toNativeSeparators(path),QString::fromUtf8(error.what())),QMessageBox::Ok,owner);message.setObjectName("projectOpenError");message.exec();}
     }
     return opened;
 }
@@ -128,7 +133,7 @@ QStringList nativeImportPaths(HWND owner,const QString& directory,bool includePd
     // loop away from Qt prevents qwindows/comdlg re-entry from corrupting
     // Qt's object tree.
     static constexpr wchar_t imageFilter[] =
-        L"Images\0*.png;*.jpg;*.jpeg;*.tif;*.tiff;*.gif;*.exr;*.hdr;*.heic;*.heif;*.psd;*.psb;*.svg;*.cr2;*.nef;*.arw;*.dng;*.raw";
+        L"Images\0*.png;*.jpg;*.jpeg;*.tif;*.tiff;*.gif;*.webp;*.exr;*.hdr;*.heic;*.heif;*.psd;*.psb;*.svg;*.cr2;*.nef;*.arw;*.dng;*.raw";
     static constexpr wchar_t allFilesFilter[] = L"\0All files\0*.*\0";
     std::wstring filter(imageFilter, std::size(imageFilter) - 1);
     if (includePdfs) filter += L";*.pdf";
@@ -142,7 +147,8 @@ QStringList nativeImportPaths(HWND owner,const QString& directory,bool includePd
     dialog.lpstrFile=buffer.data();
     dialog.nMaxFile=DWORD(buffer.size());
     dialog.lpstrInitialDir=initial.empty()?nullptr:initial.c_str();
-    dialog.lpstrTitle=L"Import Images";
+    const auto title=ui::localized("Import Images").toStdWString();
+    dialog.lpstrTitle=title.c_str();
     dialog.Flags=OFN_EXPLORER|OFN_FILEMUSTEXIST|OFN_PATHMUSTEXIST|OFN_ALLOWMULTISELECT|OFN_NOCHANGEDIR;
     logging::trace(QString("native picker entered owner=0x%1 directory=%2")
         .arg(quintptr(owner),0,16).arg(QDir::toNativeSeparators(directory)));
@@ -185,7 +191,7 @@ QString nativeSavePath(HWND owner,const QString& directory,const QString& sugges
     logging::trace(QString("native save picker returned %1").arg(QDir::toNativeSeparators(path)));
     return path;
 }
-QString chooseNativeSaveDestination(MainWindow* window,const QString& directory,const QString& suggested,const wchar_t* filter,const wchar_t* title,const wchar_t* defExt){
+QString chooseNativeSaveDestination(MainWindow* window,const QString& directory,const QString& suggested,const wchar_t* filter,const QString& title,const wchar_t* defExt){
     const auto override=window->property("testNativeSavePath").toString();
     if(!override.isEmpty())return override;
     if(window->property("nativePickerInProgress").toBool()){
@@ -201,8 +207,8 @@ QString chooseNativeSaveDestination(MainWindow* window,const QString& directory,
     // GetSaveFileNameW still runs off the Qt GUI thread; ExcludeUserInputEvents
     // keeps the wait from dispatching close/deleteLater into this stack frame.
     try{
-        ui::runOnStaThread([path,owner,directory,suggested,filter,title,defExt]{
-            *path=nativeSavePath(owner,directory,suggested,filter,title,defExt);
+        ui::runOnStaThread([path,owner,directory,suggested,filter,title=title.toStdWString(),defExt]{
+            *path=nativeSavePath(owner,directory,suggested,filter,title.c_str(),defExt);
         });
     }catch(const std::runtime_error&){
         logging::trace("native save picker thread could not be created");
@@ -228,7 +234,7 @@ QString withExportSuffix(QString path,ExportKind kind){
     const char* extension=kind==ExportKind::Jpeg?".jpg":kind==ExportKind::Pdf?".pdf":kind==ExportKind::Tiff?".tif":kind==ExportKind::Exr?".exr":kind==ExportKind::Gif?".gif":".png";
     return QDir::cleanPath(QDir(info.path()).filePath(stem+extension));
 }
-QString chooseNativeExportDestination(MainWindow* window,ExportKind kind,const QString& suggested){
+QString chooseNativeExportDestination(MainWindow* window,ExportKind kind,const QString& suggested,const QString& directory){
     static const wchar_t pngFilter[]=L"PNG\0*.png\0All files\0*.*\0";
     static const wchar_t jpegFilter[]=L"JPEG\0*.jpg;*.jpeg\0All files\0*.*\0";
     static const wchar_t pdfFilter[]=L"PDF\0*.pdf\0All files\0*.*\0";
@@ -237,7 +243,7 @@ QString chooseNativeExportDestination(MainWindow* window,ExportKind kind,const Q
     static const wchar_t gifFilter[]=L"GIF\0*.gif\0All files\0*.*\0";
     const wchar_t* filter=kind==ExportKind::Gif?gifFilter:kind==ExportKind::Exr?exrFilter:kind==ExportKind::Jpeg?jpegFilter:kind==ExportKind::Pdf?pdfFilter:kind==ExportKind::Tiff?tiffFilter:pngFilter;
     const wchar_t* defaultExtension=kind==ExportKind::Jpeg?L"jpg":kind==ExportKind::Pdf?L"pdf":kind==ExportKind::Tiff?L"tif":kind==ExportKind::Exr?L"exr":kind==ExportKind::Gif?L"gif":L"png";
-    auto path=chooseNativeSaveDestination(window,MainWindow::userDownloadsDirectory(),suggested,filter,L"Export Image",defaultExtension);
+    auto path=chooseNativeSaveDestination(window,directory,suggested,filter,ui::localized("Export Image"),defaultExtension);
     if(path.isEmpty())return {};
     return withExportSuffix(path,kind);
 }
@@ -245,7 +251,7 @@ QString chooseNativeProjectDestination(MainWindow* window,const QString& suggest
     static const wchar_t filter[]=L"Compositor project directory\0*.comp\0All files\0*.*\0";
     QFileInfo info(suggested.isEmpty()?"Untitled.comp":suggested);
     QString directory=info.isAbsolute()&&QDir(info.absolutePath()).exists()?info.absolutePath():MainWindow::userDownloadsDirectory();
-    auto path=chooseNativeSaveDestination(window,directory,info.fileName().isEmpty()?QString("Untitled.comp"):info.fileName(),filter,L"Save Compositor Project",L"comp");
+    auto path=chooseNativeSaveDestination(window,directory,info.fileName().isEmpty()?QString("Untitled.comp"):info.fileName(),filter,ui::localized("Save Compositor Project"),L"comp");
     if(path.isEmpty())return {};
     if(!path.endsWith(".comp",Qt::CaseInsensitive))path+=".comp";
     return path;
@@ -266,19 +272,24 @@ ui::ImportQueue* MainWindow::ensureImportQueue(){
         auto*p=project(target);if(!p)return;
         if(busy&&current()!=p)for(size_t i=0;i<projects_.size();++i)if(projects_[i].get()==p){tabs_->setCurrentIndex(int(i));break;}
         p->importing=busy;
-        if(busy){auto*progress=new QProgressDialog("Importing images…","Cancel",0,0,this);progress->setObjectName("imageImportProgress");progress->setWindowModality(Qt::NonModal);progress->setMinimumDuration(200);progress->setAutoClose(false);progress->setAutoReset(false);connect(progress,&QProgressDialog::canceled,this,[this,target=QPointer<QObject>(target)]{if(importQueue_&&target)importQueue_->cancel(target);});progress->setValue(0);}
+        if(busy){auto*progress=new QProgressDialog(compositor::ui::localized("Importing images…"),"Cancel",0,0,this);progress->setObjectName("imageImportProgress");progress->setWindowModality(Qt::NonModal);progress->setMinimumDuration(200);progress->setAutoClose(false);progress->setAutoReset(false);connect(progress,&QProgressDialog::canceled,this,[this,target=QPointer<QObject>(target)]{if(importQueue_&&target)importQueue_->cancel(target);});progress->setValue(0);}
         else for(auto*progress:findChildren<QProgressDialog*>("imageImportProgress")){QSignalBlocker blocked(progress);progress->close();progress->deleteLater();}
         refresh(false,false);
     };
     host.commit=[this,project](QObject* target,const ui::ImportResult& result){
         auto*p=project(target);if(!p)throw std::runtime_error("The import destination was closed");
         const bool first=ui::commitPreparedImport(*p,result);
+        if(first&&!result.firstSourcePath.empty()){
+            const QFileInfo source(QString::fromStdWString(result.firstSourcePath.wstring()));
+            p->sourceImagePath=source.absoluteFilePath();
+            p->defaultTitle=source.completeBaseName();
+        }
         p->composite.reset();refresh();if(first&&p->document){p->canvas->setDocumentSize(p->document->width,p->document->height);p->canvas->fit();}
     };
     host.completed=[this,project](QObject* target,const ui::ImportResult& result){
         if(target&&!result.errors.empty()){auto errors=target->property("imageImportErrors").toStringList();errors.append(result.errors);target->setProperty("imageImportErrors",errors);}
-        if(result.cancelled)statusBar()->showMessage("Image import cancelled",5000);
-        else if(result.imported)statusBar()->showMessage(QString("Imported %1 image(s)").arg(result.imported),5000);
+        if(result.cancelled)statusBar()->showMessage(compositor::ui::localized("Image import cancelled"),5000);
+        else if(result.imported)statusBar()->showMessage(compositor::ui::localized("Imported %1 image(s)").arg(result.imported),5000);
         QTimer::singleShot(0,this,[this]{if(!importQueue_||!importQueue_->idle())return;QStringList errors;for(const auto&p:projects_){errors.append(p->canvas->property("imageImportErrors").toStringList());p->canvas->setProperty("imageImportErrors",{});}if(errors.isEmpty())return;auto*message=new QMessageBox(QMessageBox::Warning,"Import Images","Some images could not be imported.",QMessageBox::Ok,this);message->setObjectName("imageImportErrors");message->setDetailedText(errors.join("\n\n"));message->setAttribute(Qt::WA_DeleteOnClose);message->setWindowModality(Qt::WindowModal);message->show();});
         if(workspaceDrops_)workspaceDrops_->imageFinished(target,result.cancelled);
         if(result.changed()&&!result.cameraRawLayer.empty()){
@@ -335,7 +346,7 @@ ui::WorkspaceDropQueue* MainWindow::ensureWorkspaceDropQueue(){
     };
     host.cancelImage=[this](QObject* target){if(importQueue_)importQueue_->cancel(target);};
     host.error=[this](const QString& path,const QString& error){
-        const auto text = QString("Could not open %1.\n\n%2").arg(QDir::toNativeSeparators(path), error);
+        const auto text = compositor::ui::localized("Could not open %1.\n\n%2").arg(QDir::toNativeSeparators(path), error);
         if (ui::isPdfImport(nativePath(path))) {
             showPdfImportError(this, "Receive Dropped Files", text, "workspaceDropError");
             return;
@@ -370,7 +381,7 @@ void MainWindow::queueImageImports(const QStringList& paths,EditorProject* targe
     cropDraft_.reset();cropDrag_.reset();cropSnap_.reset();refreshCropControls();
     if(transformSession_)applyTransformSession();
     if(!target)target=&addEmptyProject();
-    if(rawSettings.openCameraRaw&&editPanel_)statusBar()->showMessage("Finish or cancel the current edit to import the image and open Camera Raw.");
+    if(rawSettings.openCameraRaw&&editPanel_)statusBar()->showMessage(compositor::ui::localized("Finish or cancel the current edit to import the image and open Camera Raw."));
     ensureImportQueue()->enqueue(target->canvas,std::move(batch));
 }
 EditorProject* MainWindow::dropDestinationAt(QPoint location,std::optional<Point>& point){
@@ -446,7 +457,7 @@ void MainWindow::dropEvent(QDropEvent*event){
             // marshals an async provider, or copies a synchronous provider here.
             // A foreign blocking GetData/Read cannot be given a cancel deadline.
             QPointer<MainWindow> owner(this);
-            QPointer<QProgressDialog> progress=new QProgressDialog("Receiving dropped images…","Cancel",0,0,this);
+            QPointer<QProgressDialog> progress=new QProgressDialog(compositor::ui::localized("Receiving dropped images…"),"Cancel",0,0,this);
             progress->setObjectName("virtualImageDropProgress");progress->setWindowModality(Qt::NonModal);
             progress->setAutoClose(false);progress->setAutoReset(false);progress->setMinimumDuration(200);progress->setValue(0);
             try{
@@ -477,11 +488,11 @@ void MainWindow::dropEvent(QDropEvent*event){
         if(request.paths.isEmpty())return;
         ensureWorkspaceDropQueue()->enqueue(std::move(request));
         event->acceptProposedAction();
-    }catch(const std::exception&e){QMessageBox::critical(this,"Import Images",e.what());}
+    }catch(const std::exception&e){QMessageBox::critical(this,compositor::ui::localized("Import Images"),e.what());}
 }
 void MainWindow::setupRecentProjectsMenu(QMenu* file){
-    auto* menu=file->addMenu("Open &Recent");menu->setObjectName("openRecentMenu");
-    auto* clear=new QAction("Clear Menu",menu);clear->setObjectName("clearRecentProjects");
+    auto* menu=compositor::ui::localizedMenu(file, "Open &Recent");menu->setObjectName("openRecentMenu");
+    auto* clear=new QAction(compositor::ui::localized("Clear Menu"),menu);clear->setObjectName("clearRecentProjects");
     const auto* spec=ui::commandSpec("Open Recent","Clear Menu");
     if(!spec)throw std::logic_error("Clear Menu is not in the command catalog");
     commands_->bind(clear,*spec,[this]{QSettings settings;ui::clearRecentProjects(settings);},[](const ui::CommandState&){QSettings settings;return !ui::recentProjects(settings).isEmpty();});
@@ -518,7 +529,7 @@ void MainWindow::openProjectDialog(){
     if(!guard)return;
     managingProjectOpen_=true;refresh(false,false);
     try{if(const auto paths=ui::chooseProjectDirectories(this,MainWindow::userDownloadsDirectory())){if(!guard)return;loadProjectBatch(this,*paths,[this](const QString& path){return loadProjectDirectory(path);});}}
-    catch(const std::exception& error){if(guard)QMessageBox::critical(this,"Open Compositor Projects",QString::fromUtf8(error.what()));}
+    catch(const std::exception& error){if(guard)QMessageBox::critical(this,compositor::ui::localized("Open Compositor Projects"),QString::fromUtf8(error.what()));}
 }
 bool MainWindow::openProjectPaths(const QStringList& paths){
     if(!canSwitchProjects()||paths.isEmpty())return false;
@@ -540,10 +551,68 @@ bool MainWindow::loadProjectDirectory(const QString& path){
             }
         }
         if(transformSession_&&transformSession_->persistent)applyTransformSession();
-        ProjectStore store(makeWicProjectCodec());auto opened=store.load(supplied);
+        ProjectStore store(makeWicProjectCodec());auto observed=store.openObserved(supplied);
+        auto opened=std::move(*observed.project);
         EditorProject* project{};
         {QScopedValueRollback<bool> selecting(selectingProjectForOpen_,true);project=&addProject(std::move(opened.document),QFileInfo(path).fileName(),false);}
-        project->path=path;project->active=opened.activeLayer;project->selected={opened.activeLayer};project->history.reset();noteRecentProject(path);refresh(false);return true;
+        project->path=path;project->active=opened.activeLayer;project->selected={opened.activeLayer};project->history.reset();
+        watchProject(*project,std::move(observed.fingerprint));noteRecentProject(path);refresh(false);return true;
+}
+
+void MainWindow::watchProject(EditorProject& project,std::string fingerprint){
+    const auto path=QFileInfo(project.path).absoluteFilePath();
+    if(project.diskWatch&&project.diskWatch->path()==path){project.diskWatch->saved(std::move(fingerprint));return;}
+    if(project.diskWatch)delete project.diskWatch.data();
+    const auto findProject=[window=QPointer<MainWindow>(this),canvas=QPointer<NativeCanvas>(project.canvas)]() -> EditorProject* {
+        if(!window||!canvas)return nullptr;
+        for(const auto& candidate:window->projects_)if(candidate->canvas==canvas)return candidate.get();
+        return nullptr;
+    };
+    project.diskWatch=new ui::ProjectDiskWatch(path,std::move(fingerprint),[this,findProject]{
+        auto* owner=findProject();
+        if(!owner||closingWindow_||owner->saveJob||owner->history.editing())return false;
+        if(owner->history.modified()&&owner!=current())return false;
+        const auto state=commandState(owner);
+        return ui::canSwitchProject(state)&&!state.modalDialog&&!state.transformEdit&&!state.crop&&!state.lassoDraft
+            &&!(textSession_&&textSession_->owner==owner);
+    },[this,findProject](OpenProject next){
+        if(auto* owner=findProject())reloadChangedProject(*owner,std::move(next));
+    },project.canvas);
+}
+
+void MainWindow::reloadChangedProject(EditorProject& owner,OpenProject next){
+    if(owner.history.modified()){
+        QScopedValueRollback<bool> loading(owner.projectBusy,true);
+        QMessageBox conflict(QMessageBox::Warning,ui::localized("Project changed on disk"),
+            ui::localized("“%1” was changed by another application. Reloading discards your unsaved edits.").arg(QFileInfo(owner.path).fileName()),
+            QMessageBox::NoButton,this);
+        conflict.setProperty("studioChrome",true);
+        const auto* revert=conflict.addButton(ui::localized("Reload from Disk"),QMessageBox::DestructiveRole);
+        auto* keep=conflict.addButton(ui::localized("Keep My Changes"),QMessageBox::RejectRole);
+        conflict.setDefaultButton(keep);
+        conflict.exec();
+        if(conflict.clickedButton()!=revert)return;
+    }
+
+    std::unordered_set<std::string> ids;
+    for(const auto& layer:next.document.layers)ids.insert(layer.id);
+    if(!ids.contains(owner.active)){
+        owner.active=next.activeLayer;
+        owner.selected.clear();
+    }
+    std::erase_if(owner.selected,[&](const std::string& id){return !ids.contains(id);});
+    if(!owner.active.empty()&&std::find(owner.selected.begin(),owner.selected.end(),owner.active)==owner.selected.end())
+        owner.selected.push_back(owner.active);
+    std::erase_if(owner.collapsedGroups,[&](const std::string& id){return !ids.contains(id);});
+    owner.maskSelected=false;
+    owner.document=std::move(next.document);
+    owner.history.reset();
+    owner.composite.reset();owner.navigatorCache.reset();
+    if(&owner==current()){
+        invalidateViewportComposite();
+        refresh();
+        statusBar()->showMessage(ui::localized("Project reloaded from disk"),3000);
+    }
 }
 void MainWindow::openPath(const QString&path){
     if(QFileInfo(path).isDir()){
@@ -698,10 +767,10 @@ namespace {
 // Lists layers whose Photoshop vector content stayed pixels or was omitted. Cancel imports nothing from the file.
 bool confirmPhotoshopWarnings(QWidget* parent,const QString& file,const std::vector<std::string>& warnings){
     QStringList details;for(const auto& warning:warnings)details<<QString::fromStdString(warning);
-    QMessageBox message(QMessageBox::Warning,"Import PSD",QString("%1 import warning(s) in %2.").arg(int(warnings.size())).arg(file),QMessageBox::NoButton,parent);
+    QMessageBox message(QMessageBox::Warning,compositor::ui::localized("Import PSD"),compositor::ui::localized("%1 import warning(s) in %2.").arg(int(warnings.size())).arg(file),QMessageBox::NoButton,parent);
     message.setObjectName("psdImportWarnings");message.setDetailedText(details.join("\n"));
-    auto* proceed=message.addButton("Continue",QMessageBox::AcceptRole);proceed->setObjectName("psdContinueButton");
-    auto* cancel=message.addButton("Cancel",QMessageBox::RejectRole);cancel->setObjectName("psdCancelButton");
+    auto* proceed=message.addButton(compositor::ui::localized("Continue"),QMessageBox::AcceptRole);proceed->setObjectName("psdContinueButton");
+    auto* cancel=message.addButton(compositor::ui::localized("Cancel"),QMessageBox::RejectRole);cancel->setObjectName("psdCancelButton");
     message.setDefaultButton(proceed);message.exec();
     return message.clickedButton()==proceed;
 }
@@ -715,12 +784,14 @@ MainWindow::PhotoshopResult MainWindow::importPhotoshop(const QString& path,Cmyk
             for(auto& board:imported.artboards)addProject(std::move(board.document),QString::fromStdString(board.name),false);
             refresh();return PhotoshopResult::Imported;
         }
-        auto& project=addProject(std::move(imported.document),QFileInfo(path).fileName(),false);
+        const QFileInfo source(path);
+        auto& project=addProject(std::move(imported.document),source.completeBaseName(),false);
+        project.sourceImagePath=source.absoluteFilePath();
         if(project.document){project.active=project.document->layers.back().id;project.selected={project.active};}
         refresh();project.canvas->fit();
         return PhotoshopResult::Imported;
     }catch(const std::exception& error){
-        QMessageBox::critical(this,"Import PSD",error.what());
+        QMessageBox::critical(this,compositor::ui::localized("Import PSD"),error.what());
         return PhotoshopResult::Failed;
     }
 }
@@ -731,8 +802,39 @@ void MainWindow::focusStackImages(){
     if(injected.isValid()){focusStackSelectedImages(injected.toStringList());return;}
     pickNativeImages(this,userDownloadsDirectory(),false,[](MainWindow* window,QStringList paths){window->focusStackSelectedImages(paths);});
 }
-bool MainWindow::saveProject(bool saveAs){cropDraft_.reset();cropDrag_.reset();if(transformSession_&&transformSession_->persistent)applyTransformSession();auto*p=current();if(!p||!p->document||p->importing||p->projectBusy)return false;if(!p->saveJob.isNull()){statusBar()->showMessage("A save is already in progress",5000);return false;}auto path=p->path;if(path.isEmpty()||saveAs){path=chooseNativeProjectDestination(this,path.isEmpty()?"Untitled.comp":path);if(path.isEmpty())return false;}for(const auto& other:projects_)if(!other->savePath.isEmpty()&&QDir::cleanPath(other->savePath).compare(QDir::cleanPath(path),Qt::CaseInsensitive)==0){statusBar()->showMessage("Another open project is already saving to this location",5000);return false;}startProjectSave(*p,path);return true;}
-void MainWindow::startProjectSave(EditorProject& project,const QString& path){
+bool MainWindow::saveProject(bool saveAs){cropDraft_.reset();cropDrag_.reset();if(transformSession_&&transformSession_->persistent)applyTransformSession();auto*p=current();if(!p||!p->document||p->importing||p->projectBusy)return false;if(!p->saveJob.isNull()){statusBar()->showMessage(compositor::ui::localized("A save is already in progress"),5000);return false;}auto path=p->path;if(path.isEmpty()||saveAs){
+    auto suggestion=path;
+    if(suggestion.isEmpty()){
+        const QFileInfo source(p->sourceImagePath);
+        suggestion=p->sourceImagePath.isEmpty()?p->defaultTitle+".comp":QDir(source.absolutePath()).filePath(source.completeBaseName()+".comp");
+    }
+    path=chooseNativeProjectDestination(this,suggestion);if(path.isEmpty())return false;}for(const auto& other:projects_)if(!other->savePath.isEmpty()&&QDir::cleanPath(other->savePath).compare(QDir::cleanPath(path),Qt::CaseInsensitive)==0){statusBar()->showMessage(compositor::ui::localized("Another open project is already saving to this location"),5000);return false;}startProjectSave(*p,path);return true;}
+void MainWindow::saveMacProjectCopy(){
+    auto* owner=current();
+    if(!owner||!owner->document||owner->importing||owner->projectBusy||owner->saveJob)return;
+    if(owner->document->cmykProfile){
+        QMessageBox::information(this,ui::localized("Save Mac-Compatible Copy"),
+            ui::localized("The Mac project format cannot retain this project's CMYK profile"));return;
+    }
+    const auto currentPath=owner->path.isEmpty()?owner->sourceImagePath:owner->path;
+    const QFileInfo existing(currentPath);
+    const auto name=(currentPath.isEmpty()?owner->defaultTitle:existing.completeBaseName())+" - Mac.comp";
+    const auto suggested=currentPath.isEmpty()?name:QDir(existing.absolutePath()).filePath(name);
+    const auto destination=chooseNativeProjectDestination(this,suggested);
+    if(destination.isEmpty())return;
+    const auto same=[&](const QString& path){
+        if(path.isEmpty())return false;
+        std::error_code error;
+        return QDir::cleanPath(QFileInfo(path).absoluteFilePath()).compare(QDir::cleanPath(QFileInfo(destination).absoluteFilePath()),Qt::CaseInsensitive)==0
+            ||std::filesystem::equivalent(nativePath(path),nativePath(destination),error);
+    };
+    for(const auto& project:projects_)if(same(project->path)||same(project->savePath)){
+        QMessageBox::warning(this,ui::localized("Save Mac-Compatible Copy"),ui::localized("Choose a destination that is separate from any open project."));return;
+    }
+    startProjectSave(*owner,destination,true);
+}
+
+void MainWindow::startProjectSave(EditorProject& project,const QString& path,bool macCompatible){
     // The snapshot is the document value and revision captured here on the UI thread. The
     // worker never reads the live project, and edits after this point stay unsaved.
     const auto revision=project.history.revision();
@@ -741,37 +843,134 @@ void MainWindow::startProjectSave(EditorProject& project,const QString& path){
     project.savePath=path;
     ui::ProjectSaveJob::Host host;
     host.beforeWrite=projectSaveBeforeWrite_;
-    host.completed=[this,identity,path,revision](const QString& error){
+    host.completed=[this,identity,path,revision,macCompatible](const QString& error,std::string fingerprint){
         EditorProject* owner=nullptr;
         if(identity)for(auto& candidate:projects_)if(candidate->canvas==identity.data()){owner=candidate.get();break;}
         if(!owner){
-            if(!error.isEmpty())QMessageBox::critical(this,"Save Project",error);
+            if(!error.isEmpty())QMessageBox::critical(this,compositor::ui::localized("Save Project"),error);
             return;
         }
         owner->saveJob=nullptr;
         owner->savePath.clear();
-        if(error.isEmpty()){
+        if(error.isEmpty()&&!macCompatible){
             owner->path=path;
             owner->history.markSavedIfCurrent(revision);
+            watchProject(*owner,std::move(fingerprint));
             noteRecentProject(path);
         }
         owner->saveError=error;
         refresh(false,false);
-        if(!error.isEmpty())QMessageBox::critical(this,"Save Project",error);
+        if(!error.isEmpty())QMessageBox::critical(this,ui::localized(macCompatible?"Save Mac-Compatible Copy":"Save Project"),ui::localized(error));
+        else if(macCompatible)statusBar()->showMessage(ui::localized("Mac-compatible copy saved"),3500);
     };
-    project.saveJob=new ui::ProjectSaveJob(*project.document,project.active,path,std::move(host),this);
+    project.saveJob=new ui::ProjectSaveJob(*project.document,project.active,path,std::move(host),this,macCompatible);
     refresh(false,false);
 }
 bool MainWindow::waitForProjectSave(EditorProject& project){
     if(project.saveJob.isNull())return project.saveError.isEmpty();
     // The progress dialog is application-modal, so nothing can edit or close the project while the close decision waits.
-    QProgressDialog progress("Saving project…",QString(),0,0,this);
-    progress.setObjectName("projectSaveWait");progress.setWindowTitle("Save Project");progress.setWindowModality(Qt::ApplicationModal);progress.setCancelButton(nullptr);progress.setMinimumDuration(0);progress.show();
+    QProgressDialog progress(compositor::ui::localized("Saving project…"),QString(),0,0,this);
+    progress.setObjectName("projectSaveWait");progress.setWindowTitle(compositor::ui::localized("Save Project"));progress.setWindowModality(Qt::ApplicationModal);progress.setCancelButton(nullptr);progress.setMinimumDuration(0);progress.show();
     QEventLoop loop;
     connect(project.saveJob.data(),&QObject::destroyed,&loop,&QEventLoop::quit);
     loop.exec();
     return project.saveError.isEmpty();
 }
+void MainWindow::exportLayerPngs(){
+    auto* project=current();
+    if(!project||!project->document||!canEditLayers())return;
+    const auto selected=layerSelection();
+    if(selected.ids.empty())return;
+    auto snapshot=*project->document;
+    imaging::validateExportExtent(uint32_t(snapshot.width),uint32_t(snapshot.height));
+    struct Target{std::string id;QString name,path;};
+    std::vector<Target> targets;
+    QSet<QString> names;
+    for(auto entry=snapshot.layers.rbegin();entry!=snapshot.layers.rend();++entry){
+        if(std::find(selected.ids.begin(),selected.ids.end(),entry->id)==selected.ids.end())continue;
+        auto base=QString::fromUtf8(entry->name).replace(QRegularExpression(QStringLiteral(R"([<>:"/\\|?*\x00-\x1f])")),"_").trimmed().left(120);
+        if(!base.isEmpty()&&base.at(base.size()-1).isHighSurrogate())base.chop(1);
+        while(base.endsWith('.')||base.endsWith(' '))base.chop(1);
+        const auto stem=base.section('.',0,0).toUpper();
+        if(base.isEmpty())base=ui::localized("Layer");
+        if(stem=="CON"||stem=="PRN"||stem=="AUX"||stem=="NUL"||QRegularExpression("^(COM|LPT)[1-9]$").match(stem).hasMatch())base.prepend('_');
+        auto name=base;
+        for(int number=2;names.contains(name.toCaseFolded());++number)name=base+" "+QString::number(number);
+        names.insert(name.toCaseFolded());
+        targets.push_back({entry->id,name+".png",{}});
+    }
+    if(targets.empty())return;
+    project->projectBusy=true;refresh(false,false);
+    const auto restore=qScopeGuard([&]{project->projectBusy=false;refresh(false,false);});
+    const auto source=project->path.isEmpty()?project->sourceImagePath:project->path;
+    const auto directory=source.isEmpty()?userDownloadsDirectory():QFileInfo(source).absolutePath();
+    const auto title=ui::localized(targets.size()==1?"Export Layer as PNG":"Export Layers as PNGs");
+    if(targets.size()==1){
+        static const wchar_t filter[]=L"PNG\0*.png\0\0";
+        auto path=chooseNativeSaveDestination(this,directory,targets.front().name,filter,title,L"png");
+        if(path.isEmpty())return;
+        targets.front().path=withExportSuffix(path,ExportKind::Png);
+    }else{
+        const auto folder=QFileDialog::getExistingDirectory(this,title,directory);
+        if(folder.isEmpty())return;
+        int conflicts=0;
+        for(auto& target:targets){target.path=QDir(folder).filePath(target.name);conflicts+=QFileInfo::exists(target.path);}
+        if(conflicts&&QMessageBox::question(this,title,ui::localized("%1 output files already exist. Replace them?").arg(conflicts),
+                QMessageBox::Yes|QMessageBox::Cancel,QMessageBox::Cancel)!=QMessageBox::Yes)return;
+    }
+
+    QProgressDialog progress(ui::localized("Exporting layers…"),ui::localized("Cancel"),0,0,this);
+    progress.setProperty("studioChrome",true);progress.setWindowTitle(title);progress.setWindowModality(Qt::ApplicationModal);progress.setMinimumDuration(0);
+    const auto stop=std::make_shared<std::atomic_bool>(false);
+    using Outcome=std::pair<int,QString>;
+    QFutureWatcher<Outcome> worker;
+    connect(&progress,&QProgressDialog::canceled,&progress,[stop]{stop->store(true);});
+    connect(&worker,&QFutureWatcher<Outcome>::finished,&progress,&QDialog::accept);
+    worker.setFuture(QtConcurrent::run([snapshot=std::move(snapshot),targets=std::move(targets),stop]() -> Outcome {
+        auto cancelled=[stop]{return stop->load();};
+        SoftwareRenderer renderer;
+        int count=0;
+        try{
+            for(const auto& target:targets){
+                if(cancelled())break;
+                auto isolated=snapshot;
+                auto kept=layers::descendants(isolated,target.id);kept.insert(target.id);
+                std::unordered_set<std::string> parents;
+                auto find=[&](const std::string& id){return std::find_if(isolated.layers.begin(),isolated.layers.end(),[&](const Layer& l){return l.id==id;});};
+                for(auto it=find(target.id);it!=isolated.layers.end()&&!it->parentId.empty();it=find(it->parentId))parents.insert(it->parentId);
+                for(auto& layer:isolated.layers){
+                    if(layer.id==target.id||parents.contains(layer.id))layer.visible=true;
+                    else if(!kept.contains(layer.id)&&!kept.contains(layer.maskSourceId))layer.visible=false;
+                }
+                const auto image=renderer.renderScaled(isolated,0,0,snapshot.width,snapshot.height,1,cancelled);
+                int left=image->width,right=0,top=image->height,bottom=0;
+                for(int y=0;y<image->height&&!cancelled();++y)for(int x=0;x<image->width;++x)if(image->pixel(x,y).a){
+                    left=std::min(left,x);right=std::max(right,x+1);top=std::min(top,y);bottom=std::max(bottom,y+1);
+                }
+                if(cancelled())break;
+                if(right<=left||bottom<=top)continue;
+                const auto rows=[image,left,right,top](uint32_t y,uint32_t rows,std::span<uint8_t> out,std::size_t stride){
+                    for(uint32_t row=0;row<rows;++row)for(int x=left;x<right;++x){
+                        const auto p=image->pixel(x,top+int(y+row));const auto offset=row*stride+std::size_t(x-left)*4;
+                        out[offset]=p.r;out[offset+1]=p.g;out[offset+2]=p.b;out[offset+3]=p.a;
+                    }
+                };
+                imaging::ExportOptions options;options.dpi=snapshot.resolution;options.cancelled=cancelled;
+                imaging::StreamExportLimits limits;limits.previewWidth=limits.previewHeight=0;
+                imaging::encodeRowsAtomic(nativePath(target.path),uint32_t(right-left),uint32_t(bottom-top),rows,options,limits);
+                ++count;
+            }
+        }catch(const imaging::ExportCancelled&){}
+        catch(const std::exception& error){if(!cancelled())return {count,QString::fromUtf8(error.what())};}
+        return {count,{}};
+    }));
+    if(!worker.isFinished())progress.exec();
+    worker.waitForFinished();
+    const auto [count,error]=worker.result();
+    if(!error.isEmpty())QMessageBox::critical(this,title,ui::localized(error));
+    else if(!stop->load())statusBar()->showMessage(ui::localized("Exported %1 layer PNG(s)").arg(count),3500);
+}
+
 void MainWindow::exportImage(){
     auto*p=current();if(!p||!p->document||p->importing||p->projectBusy)return;
     imaging::validateExportExtent(uint32_t(p->document->width),uint32_t(p->document->height));
@@ -781,8 +980,11 @@ void MainWindow::exportImage(){
     p->projectBusy=true;refresh(false,false);
     struct Restore {std::function<void()> action;~Restore(){action();}} restore{[&]{p->projectBusy=false;refresh(false,false);}};
     QTemporaryDir temp;if(!temp.isValid())throw std::runtime_error("Cannot create image export storage");
-    QDialog dialog(this);dialog.setObjectName("imageExportDialog");dialog.setWindowTitle("Export Image");QFormLayout layout(&dialog);
-    QComboBox format;format.setObjectName("exportFormat");format.addItems({"PNG","JPEG","PDF","TIFF","OpenEXR","Channel Pack"});if(animated)format.addItem("GIF");layout.addRow("Format",&format);
+    QDialog dialog(this);dialog.setObjectName("imageExportDialog");dialog.setWindowTitle(compositor::ui::localized("Export Image"));QFormLayout layout(&dialog);
+    QSettings settings;
+    QComboBox format;format.setObjectName("exportFormat");format.addItems({"PNG","JPEG","PDF","TIFF","OpenEXR",ui::localized("Channel Pack")});if(animated)format.addItem("GIF");layout.addRow(ui::localized("Format"),&format);
+    const auto rememberedFormat=settings.value("imageExportFormat",int(ExportKind::Png)).toInt();
+    if(rememberedFormat>=0&&rememberedFormat<format.count())format.setCurrentIndex(rememberedFormat);
     const auto kind=[&]{return ExportKind(format.currentIndex());};
     // OpenEXR keeps linear float pixels and ignores the output profile, so CMYK is offered for the other formats only.
     const auto cmykAllowed=[&]{return kind()!=ExportKind::Png&&kind()!=ExportKind::Exr&&kind()!=ExportKind::ChannelPack&&kind()!=ExportKind::Gif;};
@@ -791,24 +993,24 @@ void MainWindow::exportImage(){
     const std::array<QStringList,4> names{QStringList{"r","red"},QStringList{"g","green"},QStringList{"b","blue"},QStringList{"a","alpha"}};
     for (size_t c=0;c<channels.size();++c) {
         auto& box=channels[c]; box.setObjectName(QString("exportChannel%1").arg(labels[c]));
-        box.addItem("Black",QString()); box.addItem("White",QString("white"));
+        box.addItem(ui::localized("Black"),QString()); box.addItem(ui::localized("White"),QString("white"));
         int selected=c==3?1:0;
         for (const auto& layer:snapshot.layers) if (layer.adjustmentJson.empty()) {
             box.addItem(QString::fromStdString(layer.name),QString("L")+QString::fromStdString(layer.id));
             if(names[c].contains(QString::fromStdString(layer.name).trimmed().toLower())) selected=box.count()-1;
         }
-        box.setCurrentIndex(selected); layout.addRow(labels[c],&box);
+        box.setCurrentIndex(selected); layout.addRow(ui::localized(labels[c]),&box);
     }
-    QComboBox colorMode;colorMode.setObjectName("exportColorMode");colorMode.addItems({"RGB","CMYK"});layout.addRow("Color mode",&colorMode);
+    QComboBox colorMode;colorMode.setObjectName("exportColorMode");colorMode.addItems({"RGB","CMYK"});layout.addRow(compositor::ui::localized("Color mode"),&colorMode);
     CmykProfilePtr outputProfile=snapshot.cmykProfile;
-    QPushButton profileButton(outputProfile?QString::fromStdString(outputProfile->name):"Choose CMYK profile…");profileButton.setObjectName("exportCmykProfile");layout.addRow("Profile",&profileButton);
+    QPushButton profileButton(outputProfile?QString::fromStdString(outputProfile->name):ui::localized("Choose CMYK profile…"));profileButton.setObjectName("exportCmykProfile");layout.addRow(compositor::ui::localized("Profile"),&profileButton);
     // PDF only: the page holds the canvas resampled by this factor, at the document's resolution, so it prints that much larger or smaller.
-    QComboBox scale;scale.setObjectName("exportScale");for(const int percent:{25,50,75,100,200})scale.addItem(QString("%1%").arg(percent),percent/100.);scale.setCurrentIndex(3);layout.addRow("Scale",&scale);
-    QLabel pageSize;pageSize.setObjectName("exportPageSize");layout.addRow("Page",&pageSize);
-    QSettings settings;double remembered=settings.value("jpegExportQuality",.85).toDouble();if(!std::isfinite(remembered))remembered=.85;
-    ui::TrackSlider quality(Qt::Horizontal);quality.setObjectName("exportQuality");quality.setRange(0,100);quality.setDefaultValue(85);quality.setValue(int(std::round(std::clamp(remembered,0.,1.)*100)));layout.addRow("JPEG quality",&quality);
+    QComboBox scale;scale.setObjectName("exportScale");for(const int percent:{25,50,75,100,200})scale.addItem(QString("%1%").arg(percent),percent/100.);scale.setCurrentIndex(3);layout.addRow(compositor::ui::localized("Scale"),&scale);
+    QLabel pageSize;pageSize.setObjectName("exportPageSize");layout.addRow(compositor::ui::localized("Page"),&pageSize);
+    double remembered=settings.value("jpegExportQuality",.85).toDouble();if(!std::isfinite(remembered))remembered=.85;
+    ui::TrackSlider quality(Qt::Horizontal);quality.setObjectName("exportQuality");quality.setRange(0,100);quality.setDefaultValue(85);quality.setValue(int(std::round(std::clamp(remembered,0.,1.)*100)));layout.addRow(compositor::ui::localized("JPEG quality"),&quality);
     // JPEG and PDF have no transparency in the preview or the file; this color fills the canvas wherever it is transparent.
-    QPushButton matte("White");matte.setObjectName("exportMatte");QColor matteColor=Qt::white;layout.addRow("Background",&matte);
+    QPushButton matte(compositor::ui::localized("White"));matte.setObjectName("exportMatte");QColor matteColor=Qt::white;layout.addRow(compositor::ui::localized("Background"),&matte);
     auto showPageSize=[&]{
         const auto size=imaging::scaledExportSize(uint32_t(snapshot.width),uint32_t(snapshot.height),scale.currentData().toDouble());
         auto inches=[&](uint32_t pixels){auto text=QString::number(pixels/snapshot.resolution,'f',2);while(text.endsWith('0'))text.chop(1);if(text.endsWith('.'))text.chop(1);return text;};
@@ -816,25 +1018,25 @@ void MainWindow::exportImage(){
     };
     showPageSize();layout.setRowVisible(&pageSize,false);
     QLabel preview;preview.setObjectName("exportPreview");preview.setMinimumSize(520,320);preview.setAlignment(Qt::AlignCenter);layout.addRow(&preview);
-    ui::TrackSlider previewZoom(Qt::Horizontal);previewZoom.setObjectName("exportPreviewZoom");previewZoom.setRange(25,400);previewZoom.setDefaultValue(100);previewZoom.setValue(100);layout.addRow("Preview zoom",&previewZoom);QPixmap previewSource;auto showPreview=[&]{if(previewSource.isNull())return;preview.setPixmap(previewSource.scaled(previewSource.size()*previewZoom.value()/100.,Qt::KeepAspectRatio,Qt::SmoothTransformation));};
-    QPushButton animatedPreview("Play");animatedPreview.setObjectName("exportAnimatedPreview");animatedPreview.setEnabled(false);layout.addRow("Animated preview",&animatedPreview);
+    ui::TrackSlider previewZoom(Qt::Horizontal);previewZoom.setObjectName("exportPreviewZoom");previewZoom.setRange(25,400);previewZoom.setDefaultValue(100);previewZoom.setValue(100);layout.addRow(compositor::ui::localized("Preview zoom"),&previewZoom);QPixmap previewSource;auto showPreview=[&]{if(previewSource.isNull())return;preview.setPixmap(previewSource.scaled(previewSource.size()*previewZoom.value()/100.,Qt::KeepAspectRatio,Qt::SmoothTransformation));};
+    QPushButton animatedPreview(compositor::ui::localized("Play"));animatedPreview.setObjectName("exportAnimatedPreview");animatedPreview.setEnabled(false);layout.addRow(compositor::ui::localized("Animated preview"),&animatedPreview);
     QTimer animationTimer;animationTimer.setSingleShot(true);
     std::vector<std::pair<QImage,int>> previewFrames;size_t previewFrame=0;bool playing=false;
-    auto stopAnimation=[&]{animationTimer.stop();playing=false;animatedPreview.setText("Play");};
+    auto stopAnimation=[&]{animationTimer.stop();playing=false;animatedPreview.setText(compositor::ui::localized("Play"));};
     auto showFrame=[&]{if(previewFrames.empty())return;previewSource=QPixmap::fromImage(previewFrames[previewFrame].first);showPreview();dialog.setProperty("animatedPreviewFrame",int(previewFrame));};
     connect(&animationTimer,&QTimer::timeout,&dialog,[&]{if(!playing||previewFrames.empty())return;previewFrame=(previewFrame+1)%previewFrames.size();showFrame();animationTimer.start(std::max(20,previewFrames[previewFrame].second));});
-    connect(&animatedPreview,&QPushButton::clicked,&dialog,[&]{if(playing){stopAnimation();return;}if(previewFrames.size()<2)return;playing=true;animatedPreview.setText("Pause");animationTimer.start(std::max(20,previewFrames[previewFrame].second));});
-    QLabel bytesLabel;bytesLabel.setObjectName("exportEncodedSize");layout.addRow("Encoded size",&bytesLabel);
+    connect(&animatedPreview,&QPushButton::clicked,&dialog,[&]{if(playing){stopAnimation();return;}if(previewFrames.size()<2)return;playing=true;animatedPreview.setText(compositor::ui::localized("Pause"));animationTimer.start(std::max(20,previewFrames[previewFrame].second));});
+    QLabel bytesLabel;bytesLabel.setObjectName("exportEncodedSize");layout.addRow(compositor::ui::localized("Encoded size"),&bytesLabel);
     QDialogButtonBox buttons(QDialogButtonBox::Save|QDialogButtonBox::Cancel);buttons.setObjectName("exportButtons");layout.addRow(&buttons);
     struct Prepared {imaging::StreamingExportResult result;std::vector<std::pair<QImage,int>> frames;QString path,error;bool cancelled{};};
     QFutureWatcher<Prepared> watcher;QTimer debounce,progress;debounce.setSingleShot(true);debounce.setInterval(200);progress.setInterval(80);
     auto cancel=std::make_shared<std::atomic_bool>(false);auto percent=std::make_shared<std::atomic_uint32_t>(0);
     quint64 generation=0,runningGeneration=0;bool running=false,closed=false;QString readyPath;
     std::function<void()> start;
-    auto changed=[&]{stopAnimation();previewFrames.clear();previewFrame=0;animatedPreview.setEnabled(false);++generation;cancel->store(true);readyPath.clear();buttons.button(QDialogButtonBox::Save)->setEnabled(false);bytesLabel.setText("Updating preview…");debounce.start();};
+    auto changed=[&]{stopAnimation();previewFrames.clear();previewFrame=0;animatedPreview.setEnabled(false);++generation;cancel->store(true);readyPath.clear();buttons.button(QDialogButtonBox::Save)->setEnabled(false);bytesLabel.setText(compositor::ui::localized("Updating preview…"));debounce.start();};
     start=[&]{
         if(running||closed)return;
-        if(colorMode.currentIndex()==1&&cmykAllowed()&&!outputProfile){bytesLabel.setText("Choose a CMYK output profile");return;}
+        if(colorMode.currentIndex()==1&&cmykAllowed()&&!outputProfile){bytesLabel.setText(compositor::ui::localized("Choose a CMYK output profile"));return;}
         running=true;runningGeneration=generation;cancel=std::make_shared<std::atomic_bool>(false);percent->store(0);
         imaging::ExportOptions options;options.format=(kind()==ExportKind::Png||kind()==ExportKind::ChannelPack)?imaging::ImageFormat::Png:kind()==ExportKind::Jpeg?imaging::ImageFormat::Jpeg:kind()==ExportKind::Tiff?imaging::ImageFormat::Tiff:kind()==ExportKind::Exr?imaging::ImageFormat::Exr:imaging::ImageFormat::Pdf;options.cmykProfile=colorMode.currentIndex()==1&&cmykAllowed()?outputProfile:nullptr;options.jpegQuality=quality.value()/100.;
         if(kind()==ExportKind::Pdf)options.scale=scale.currentData().toDouble();
@@ -897,23 +1099,23 @@ void MainWindow::exportImage(){
         if(!prepared.error.isEmpty()){bytesLabel.setText(prepared.error);return;}
         const auto&image=prepared.result.preview;
         QImage shown(image.pixels.data(),int(image.width),int(image.height),qsizetype(image.stride),QImage::Format_RGBA8888_Premultiplied);
-        if(shown.isNull()){bytesLabel.setText("Cannot display export preview");return;}
+        if(shown.isNull()){bytesLabel.setText(compositor::ui::localized("Cannot display export preview"));return;}
         previewSource=QPixmap::fromImage(shown.copy());showPreview();readyPath=prepared.path;
         previewFrames=std::move(prepared.frames);previewFrame=0;animatedPreview.setEnabled(kind()==ExportKind::Gif&&previewFrames.size()>1);if(!previewFrames.empty())showFrame();
         bytesLabel.setText(QString::number(prepared.result.encodedBytes)+" bytes");buttons.button(QDialogButtonBox::Save)->setEnabled(true);
         dialog.setProperty("readyExportPath",readyPath);dialog.setProperty("readyExportGeneration",generation);
     });
     connect(&debounce,&QTimer::timeout,&dialog,start);
-    connect(&progress,&QTimer::timeout,&dialog,[&]{if(running&&runningGeneration==generation)bytesLabel.setText(QString("Encoding %1%").arg(percent->load()));});
+    connect(&progress,&QTimer::timeout,&dialog,[&]{if(running&&runningGeneration==generation)bytesLabel.setText(compositor::ui::localized("Encoding %1%").arg(percent->load()));});
     auto applyKind=[&]{for(auto& box:channels)layout.setRowVisible(&box,kind()==ExportKind::ChannelPack);const bool matteUsed=kind()==ExportKind::Jpeg||kind()==ExportKind::Pdf||(kind()==ExportKind::Tiff&&colorMode.currentIndex()==1);colorMode.setEnabled(cmykAllowed());profileButton.setEnabled(cmykAllowed()&&colorMode.currentIndex()==1);quality.setEnabled(kind()==ExportKind::Jpeg);matte.setEnabled(matteUsed);layout.setRowVisible(&matte,matteUsed);scale.setEnabled(kind()==ExportKind::Pdf);layout.setRowVisible(&quality,kind()==ExportKind::Jpeg);layout.setRowVisible(&scale,kind()==ExportKind::Pdf);layout.setRowVisible(&pageSize,kind()==ExportKind::Pdf);layout.setRowVisible(&animatedPreview,kind()==ExportKind::Gif);};
     for(auto& box:channels)connect(&box,&QComboBox::currentIndexChanged,&dialog,changed);
     connect(&colorMode,&QComboBox::currentIndexChanged,&dialog,[&]{applyKind();changed();});
-    connect(&profileButton,&QPushButton::clicked,&dialog,[&]{const auto path=chooseNativeCmykProfilePath();if(path.isEmpty())return;try{auto profile=imaging::readCmykProfile(nativePath(path));outputProfile=std::move(profile);profileButton.setText(QString::fromStdString(outputProfile->name));changed();}catch(const std::exception& error){QMessageBox::critical(&dialog,"CMYK profile",error.what());}});
+    connect(&profileButton,&QPushButton::clicked,&dialog,[&]{const auto path=chooseNativeCmykProfilePath();if(path.isEmpty())return;try{auto profile=imaging::readCmykProfile(nativePath(path));outputProfile=std::move(profile);profileButton.setText(QString::fromStdString(outputProfile->name));changed();}catch(const std::exception& error){QMessageBox::critical(&dialog,compositor::ui::localized("CMYK profile"),error.what());}});
     connect(&format,&QComboBox::currentIndexChanged,&dialog,[&]{applyKind();changed();});
     connect(&scale,&QComboBox::currentIndexChanged,&dialog,[&]{showPageSize();changed();});
     connect(&quality,&QSlider::valueChanged,&dialog,changed);
     connect(&previewZoom,&QSlider::valueChanged,&dialog,showPreview);
-    connect(&matte,&QPushButton::clicked,&dialog,[&]{auto color=QColorDialog::getColor(matteColor,&dialog,"Export background");if(color.isValid()){matteColor=color;matte.setText(color.name());changed();}});
+    connect(&matte,&QPushButton::clicked,&dialog,[&]{auto color=QColorDialog::getColor(matteColor,&dialog,ui::localized("Export background"));if(color.isValid()){matteColor=color;matte.setText(color.name());changed();}});
     connect(&buttons,&QDialogButtonBox::accepted,&dialog,[&]{if(!readyPath.isEmpty()&&!running)dialog.accept();});
     connect(&buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
     applyKind();changed();progress.start();
@@ -921,14 +1123,18 @@ void MainWindow::exportImage(){
     if(response!=QDialog::Accepted||readyPath.isEmpty())return;
     const auto chosen=kind();
     if(chosen==ExportKind::Jpeg)settings.setValue("jpegExportQuality",quality.value()/100.);
-    const auto suggested=(p->path.isEmpty()?QString("Untitled"):QFileInfo(p->path).completeBaseName())+((chosen==ExportKind::Png||chosen==ExportKind::ChannelPack)?".png":chosen==ExportKind::Jpeg?".jpg":chosen==ExportKind::Tiff?".tif":chosen==ExportKind::Exr?".exr":chosen==ExportKind::Gif?".gif":".pdf");
-    const auto destination=chooseNativeExportDestination(this,chosen,suggested);if(destination.isEmpty())return;
-    QProgressDialog saving("Saving image…","Cancel",0,0,this);saving.setObjectName("imageExportSaving");saving.setWindowModality(Qt::ApplicationModal);saving.setMinimumDuration(0);
+    const auto sourcePath=p->path.isEmpty()?p->sourceImagePath:p->path;
+    const QFileInfo source(sourcePath);
+    const auto suggested=(sourcePath.isEmpty()?p->defaultTitle:source.completeBaseName())+((chosen==ExportKind::Png||chosen==ExportKind::ChannelPack)?".png":chosen==ExportKind::Jpeg?".jpg":chosen==ExportKind::Tiff?".tif":chosen==ExportKind::Exr?".exr":chosen==ExportKind::Gif?".gif":".pdf");
+    const auto directory=!sourcePath.isEmpty()&&QDir(source.absolutePath()).exists()?source.absolutePath():userDownloadsDirectory();
+    const auto destination=chooseNativeExportDestination(this,chosen,suggested,directory);if(destination.isEmpty())return;
+    QProgressDialog saving(ui::localized("Saving image…"),ui::localized("Cancel"),0,0,this);saving.setObjectName("imageExportSaving");saving.setWindowModality(Qt::ApplicationModal);saving.setMinimumDuration(0);
     auto copyCancelled=std::make_shared<std::atomic_bool>(false);QFutureWatcher<QString> copy;
     connect(&saving,&QProgressDialog::canceled,&saving,[copyCancelled]{copyCancelled->store(true);});
     connect(&copy,&QFutureWatcher<QString>::finished,&saving,&QDialog::accept);
     copy.setFuture(QtConcurrent::run([readyPath,destination,copyCancelled]{try{imaging::copyEncodedAtomic(nativePath(readyPath),nativePath(destination),[copyCancelled]{return copyCancelled->load();});return QString();}catch(const imaging::ExportCancelled&){return QString();}catch(const std::exception&e){return QString::fromUtf8(e.what());}}));
     saving.exec();copy.waitForFinished();if(!copy.result().isEmpty())throw std::runtime_error(copy.result().toStdString());
+    if(!copyCancelled->load())settings.setValue("imageExportFormat",int(chosen));
     // The file that produced the encoded preview is copied exactly. No project/history mutation.
 }
 }

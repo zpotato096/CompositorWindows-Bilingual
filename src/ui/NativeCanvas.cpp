@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "NativeCanvas.h"
 #include "CanvasAccessibility.h"
 #include <QGuiApplication>
@@ -45,7 +46,7 @@ IDWriteTextFormat* rulerTextFormat(){
     return format.Get();
 }
 }
-NativeCanvas::NativeCanvas(bool warp,QWidget*parent):QWidget(parent),warp_(warp){ui::installCanvasAccessibility();setAttribute(Qt::WA_NativeWindow);setAttribute(Qt::WA_PaintOnScreen);setAttribute(Qt::WA_NoSystemBackground);setFocusPolicy(Qt::StrongFocus);setMouseTracking(true);setAccessibleName("Image canvas");setMinimumSize(160,120);selectionTimer_=new QTimer(this);selectionTimer_->setObjectName("selectionAntsTimer");selectionTimer_->setTimerType(Qt::PreciseTimer);selectionTimer_->setInterval(120);connect(selectionTimer_,&QTimer::timeout,this,[this]{selectionPhase_=(selectionPhase_+1)%8;update();});navigatorTimer_=new QTimer(this);navigatorTimer_->setObjectName("navigatorTimer");navigatorTimer_->setSingleShot(true);navigatorTimer_->setInterval(300);connect(navigatorTimer_,&QTimer::timeout,this,[this]{refreshNavigator();});synchronizeViewport();}
+NativeCanvas::NativeCanvas(bool warp,QWidget*parent):QWidget(parent),warp_(warp){ui::installCanvasAccessibility();setAttribute(Qt::WA_NativeWindow);setAttribute(Qt::WA_PaintOnScreen);setAttribute(Qt::WA_NoSystemBackground);setFocusPolicy(Qt::StrongFocus);setMouseTracking(true);setAccessibleName(compositor::ui::localized("Image canvas"));setMinimumSize(160,120);selectionTimer_=new QTimer(this);selectionTimer_->setObjectName("selectionAntsTimer");selectionTimer_->setTimerType(Qt::PreciseTimer);selectionTimer_->setInterval(120);connect(selectionTimer_,&QTimer::timeout,this,[this]{selectionPhase_=(selectionPhase_+1)%8;update();});navigatorTimer_=new QTimer(this);navigatorTimer_->setObjectName("navigatorTimer");navigatorTimer_->setSingleShot(true);navigatorTimer_->setInterval(300);connect(navigatorTimer_,&QTimer::timeout,this,[this]{refreshNavigator();});synchronizeViewport();}
 NativeCanvas::~NativeCanvas(){shutdownCmykProof();selectionTimer_->stop();navigatorTimer_->stop();if(viewportTimer_)viewportTimer_->stop();profileWatcher_.reset();if(profileWindow_)profileWindow_->removeEventFilter(this);QObject::disconnect(profileScreenConnection_);releaseDevice();}
 void NativeCanvas::releaseDevice(){checkerBrush_.Reset();checkerScale_=0;selectionGeometry_.Reset();selectionMatrix_.reset();brushPreviewBitmap_.Reset();brushPreviewSource_.reset();textBitmap_.Reset();textRasterSource_.reset();navigatorBitmap_.Reset();resetPresentationResources();displayTiles_.clear();image_.Reset();target_.Reset();if(context_)context_->SetTarget(nullptr);context_.Reset();d2device_.Reset();factory_.Reset();swap_.Reset();immediate_.Reset();device_.Reset();}
 void NativeCanvas::ensureChecker(){

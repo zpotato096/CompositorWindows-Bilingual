@@ -33,7 +33,7 @@ std::size_t count(int w,int h,const Limits& l,std::uint64_t bytesPerPixel=24){
 void checkSelection(const GrayRaster& m){if(m.width<1||m.height<1||m.width>30000||m.height>30000||std::uint64_t(m.width)*m.height>100000000||m.pixels.size()!=std::size_t(m.width)*m.height)throw std::runtime_error("Invalid source selection storage");}
 bool empty(const GrayRaster& m){return std::none_of(m.pixels.begin(),m.pixels.end(),[](auto p){return p!=0;});}
 double normalized(double value,double low,double high,double fallback){return std::isfinite(value)?std::clamp(value,low,high):fallback;}
-void kindCheck(Kind k){switch(k){case Kind::GaussianBlur:case Kind::MotionBlur:case Kind::AddNoise:case Kind::LensCorrection:case Kind::ContentAwareFill:case Kind::Vignette:case Kind::Bloom:case Kind::TonalContrast:case Kind::Dither:case Kind::Scanlines:case Kind::CameraRaw:case Kind::ProgressiveBlur:case Kind::RgbSplit:case Kind::LensEffects:return;}throw std::runtime_error("Unsupported filter kind");}
+void kindCheck(Kind k){switch(k){case Kind::GaussianBlur:case Kind::MotionBlur:case Kind::AddNoise:case Kind::LensCorrection:case Kind::ContentAwareFill:case Kind::Vignette:case Kind::Bloom:case Kind::TonalContrast:case Kind::Dither:case Kind::Scanlines:case Kind::CameraRaw:case Kind::ProgressiveBlur:case Kind::RgbSplit:case Kind::LensEffects:case Kind::Sharpen:case Kind::ReduceNoise:case Kind::RimLight:case Kind::VolumetricLight:return;}throw std::runtime_error("Unsupported filter kind");}
 bool spreads(Kind k){return k==Kind::GaussianBlur||k==Kind::MotionBlur||k==Kind::ProgressiveBlur||k==Kind::RgbSplit;}
 graphics::Rgba8View view(std::vector<std::uint8_t>& v,int w,int h){return {v,std::uint32_t(w),std::uint32_t(h),std::size_t(w)*4};}
 std::uint8_t byte(double x){return std::uint8_t(std::clamp(std::floor(x+.5),0.,255.));}
@@ -50,6 +50,57 @@ template<class T> std::vector<T> gaussian(const std::vector<T>& source,int w,int
     for(int c=0;c<4;++c){for(int y=0;y<h;++y){cancel(limits);for(int x=0;x<w;++x){if((x&255)==0)cancel(limits);double sum=0;for(int k=-r;k<=r;++k){const int xx=along(x+k,w,clamp.left,clamp.right);if(xx>=0)sum+=source[(std::size_t(y)*w+xx)*4+c]*weights[k+r];}pass[std::size_t(y)*w+x]=float(sum);}}
         for(int y=0;y<h;++y){cancel(limits);for(int x=0;x<w;++x){if((x&255)==0)cancel(limits);double sum=0;for(int k=-r;k<=r;++k){const int yy=along(y+k,h,clamp.top,clamp.bottom);if(yy>=0)sum+=pass[std::size_t(yy)*w+x]*weights[k+r];}output[(std::size_t(y)*w+x)*4+c]=blurValue<T>(sum);}}}
     return output;
+}
+template<class T> void sharpen(std::vector<T>& pixels, int width, int height, const Settings& settings,
+                               double scale, const Limits& limits, bool hdr = false) {
+    const auto blurred = gaussian(pixels, width, height, settings.sharpenRadius * scale, limits, {true,true,true,true});
+    const double amount = settings.sharpenAmount / 100;
+    for (int y = 0; y < height; ++y) {
+        cancel(limits);
+        for (int x = 0; x < width; ++x) {
+            const auto offset = (std::size_t(y) * width + x) * 4;
+            const double alpha = pixels[offset + 3];
+            if (alpha == 0) continue;
+            const double blurredAlpha = blurred[offset + 3];
+            for (int channel = 0; channel < 3; ++channel) {
+                const auto i = offset + channel;
+                const double local = blurredAlpha > 0 ? blurred[i] * alpha / blurredAlpha : pixels[i];
+                const double value = pixels[i] + amount * (pixels[i] - local);
+                pixels[i] = blurValue<T>(hdr ? std::clamp(value, -65504.0 * alpha, 65504.0 * alpha) : std::clamp(value, 0.0, alpha));
+            }
+        }
+    }
+}
+void reduceNoise(std::vector<uint8_t>& pixels, int width, int height, const Settings& settings,
+                 double scale, const Limits& limits) {
+    auto stopped = [&limits] { return limits.cancelled && limits.cancelled(); };
+    const CameraRawCancel check{[](void* context) { return int((*static_cast<decltype(stopped)*>(context))()); }, &stopped};
+    if (!adjust_camera_raw_detail(pixels.data(), width, height, std::size_t(width) * 4,
+                                  0, 0, 0, 0, settings.noiseStrength, settings.noiseDetail, 0,
+                                  settings.noiseColor, 50, 50, scale, check)) {
+        cancel(limits);
+        throw std::runtime_error("Could not allocate the noise reduction buffers");
+    }
+}
+void reduceNoiseDeep(std::vector<float>& pixels, int width, int height, const Settings& settings,
+                     double scale, const Limits& limits, bool hdr) {
+    // Apply the detail kernel's change to the original high-precision samples.
+    std::vector<uint8_t> guide(pixels.size());
+    for (std::size_t i = 0; i < pixels.size(); ++i) guide[i] = byte(pixels[i] * 255);
+    reduceNoise(guide, width, height, settings, scale, limits);
+    for (int y = 0; y < height; ++y) {
+        cancel(limits);
+        for (int x = 0; x < width; ++x) {
+            const auto offset = (std::size_t(y) * width + x) * 4;
+            const auto alpha = pixels[offset + 3];
+            for (int channel = 0; channel < 3; ++channel) {
+                const auto i = offset + channel;
+                const float correction = (int(guide[i]) - int(byte(pixels[i] * 255))) / 255.0f;
+                const auto value = pixels[i] + correction;
+                pixels[i] = hdr ? std::clamp(value, -65504.0f * alpha, 65504.0f * alpha) : std::clamp(value, 0.0f, alpha);
+            }
+        }
+    }
 }
 template<class Sum=float> void boxPass(std::vector<float>& a,std::vector<float>& b,int w,int h,bool horizontal,int radius,LayerSides clamp,const Limits& limits){
     const int lines=horizontal?h:w,length=horizontal?w:h;
@@ -256,6 +307,8 @@ std::vector<float> lensPixels(const std::vector<float>& input,int w,int h,const 
 bool finishingIdentity(Kind kind,const Settings& s){
     switch(kind){
     case Kind::LensEffects:return s.lens.isIdentity();
+    case Kind::Sharpen:return s.sharpenAmount==0;
+    case Kind::ReduceNoise:return s.noiseStrength==0&&s.noiseColor==0;
     case Kind::Vignette:return s.vignetteLayer?s.vignetteLayer->amount==0:s.vignette==0;
     case Kind::Bloom:return s.bloomGlow?s.bloomAmount==0:s.bloom==0;
     case Kind::TonalContrast:return s.tonalLayer ? s.tonalLayer->amount==0 || (s.tonalLayer->shadows==0 && s.tonalLayer->midtones==0 && s.tonalLayer->highlights==0) : s.tonal==0;
@@ -498,7 +551,13 @@ bool LensEffectSettings::isIdentity() const {
     switch(s.effect){case LensEffect::AnamorphicFlare:return s.flareAmount==0;case LensEffect::Starburst:return s.starAmount==0;case LensEffect::Mist:return s.mistStrength==0;case LensEffect::Prism:return s.prismAmount==0;case LensEffect::Bokeh:return false;}
     return false;
 }
-Settings Settings::normalized()const{auto out=*this;out.lens=lens.normalized();if(out.vignetteLayer){auto& v=*out.vignetteLayer;v.amount=filters::normalized(v.amount,0,100,35);v.midpoint=filters::normalized(v.midpoint,0,100,50);v.roundness=filters::normalized(v.roundness,-100,100,100);v.feather=filters::normalized(v.feather,0,100,60);v.highlights=filters::normalized(v.highlights,0,100,25);for(auto& c:v.color)c=filters::normalized(c,0,1,0);}out.radius=filters::normalized(radius,.1,250,1);out.angle=filters::normalized(angle,-90,90,0);out.distance=filters::normalized(distance,1,2000,10);out.amount=filters::normalized(amount,.1,400,10);out.distortion=filters::normalized(distortion,-100,100,0);out.vignette=filters::normalized(vignette,0,100,0);out.vignetteMidpoint=filters::normalized(vignetteMidpoint,0,1,.5);out.vignetteFeather=filters::normalized(vignetteFeather,0,1,.5);out.bloom=filters::normalized(bloom,0,100,0);out.bloomThreshold=filters::normalized(bloomThreshold,0,1,.6);out.tonal=filters::normalized(tonal,0,100,0);out.ditherLevels=int(filters::normalized(ditherLevels,0,16,0));out.ditherStyle=int(filters::normalized(ditherStyle,0,2,0));out.scanline=filters::normalized(scanline,0,100,0);out.scanlineGlow=filters::normalized(scanlineGlow,0,100,0);out.progressiveFrom=filters::normalized(progressiveFrom,0,250,0);out.progressiveTo=filters::normalized(progressiveTo,0,250,20);out.bloomAmount=filters::normalized(bloomAmount,0,100,40);out.bloomRadius=filters::normalized(bloomRadius,1,150,24);out.rgbSplitDistance=filters::normalized(rgbSplitDistance,0,200,10);out.rgbSplitBlur=filters::normalized(rgbSplitBlur,0,400,0);out.rgbSplitAngle=filters::normalized(rgbSplitAngle,-180,180,0);out.rgbSplitReach=filters::normalized(rgbSplitReach,1e-9,3200000,1000);for(auto* point:{&out.progressiveStart,&out.progressiveEnd,&out.rgbSplitCenter})if(*point&&(!std::isfinite((*point)->x)||!std::isfinite((*point)->y)))point->reset();return out;}
+Settings Settings::normalized()const{auto out=*this;out.lens=lens.normalized();
+    out.sharpenAmount=filters::normalized(sharpenAmount,0,300,100);
+    out.sharpenRadius=filters::normalized(sharpenRadius,.1,20,1);
+    out.noiseStrength=filters::normalized(noiseStrength,0,100,50);
+    out.noiseDetail=filters::normalized(noiseDetail,0,100,50);
+    out.noiseColor=filters::normalized(noiseColor,0,100,50);
+    if(out.vignetteLayer){auto& v=*out.vignetteLayer;v.amount=filters::normalized(v.amount,0,100,35);v.midpoint=filters::normalized(v.midpoint,0,100,50);v.roundness=filters::normalized(v.roundness,-100,100,100);v.feather=filters::normalized(v.feather,0,100,60);v.highlights=filters::normalized(v.highlights,0,100,25);for(auto& c:v.color)c=filters::normalized(c,0,1,0);}out.radius=filters::normalized(radius,.1,250,1);out.angle=filters::normalized(angle,-90,90,0);out.distance=filters::normalized(distance,1,2000,10);out.amount=filters::normalized(amount,.1,400,10);out.distortion=filters::normalized(distortion,-100,100,0);out.vignette=filters::normalized(vignette,0,100,0);out.vignetteMidpoint=filters::normalized(vignetteMidpoint,0,1,.5);out.vignetteFeather=filters::normalized(vignetteFeather,0,1,.5);out.bloom=filters::normalized(bloom,0,100,0);out.bloomThreshold=filters::normalized(bloomThreshold,0,1,.6);out.tonal=filters::normalized(tonal,0,100,0);out.ditherLevels=int(filters::normalized(ditherLevels,0,16,0));out.ditherStyle=int(filters::normalized(ditherStyle,0,2,0));out.scanline=filters::normalized(scanline,0,100,0);out.scanlineGlow=filters::normalized(scanlineGlow,0,100,0);out.progressiveFrom=filters::normalized(progressiveFrom,0,250,0);out.progressiveTo=filters::normalized(progressiveTo,0,250,20);out.bloomAmount=filters::normalized(bloomAmount,0,100,40);out.bloomRadius=filters::normalized(bloomRadius,1,150,24);out.rgbSplitDistance=filters::normalized(rgbSplitDistance,0,200,10);out.rgbSplitBlur=filters::normalized(rgbSplitBlur,0,400,0);out.rgbSplitAngle=filters::normalized(rgbSplitAngle,-180,180,0);out.rgbSplitReach=filters::normalized(rgbSplitReach,1e-9,3200000,1000);for(auto* point:{&out.progressiveStart,&out.progressiveEnd,&out.rgbSplitCenter})if(*point&&(!std::isfinite((*point)->x)||!std::isfinite((*point)->y)))point->reset();return out;}
 bool supportsHdr(Kind kind){return kind!=Kind::LensEffects&&kind!=Kind::LensCorrection&&kind!=Kind::ContentAwareFill&&kind!=Kind::Bloom&&kind!=Kind::TonalContrast&&kind!=Kind::Scanlines&&kind!=Kind::RgbSplit;}
 double blurMargin(Kind kind,const Settings& raw){kindCheck(kind);auto s=raw.normalized();return kind==Kind::GaussianBlur?s.radius*3+2:kind==Kind::MotionBlur?s.distance/2+2:kind==Kind::ProgressiveBlur?std::max(s.progressiveFrom,s.progressiveTo)*3+2:kind==Kind::RgbSplit?(s.rgbSplitDistance+s.rgbSplitBlur)*(s.rgbSplitRadial?2:1)+2:kind==Kind::Bloom&&s.bloomGlow?s.bloomRadius*3+2:0;}
 LayerSides canvasTouchingSides(const Transform& placed,int sourceWidth,int sourceHeight,int canvasWidth,int canvasHeight){
@@ -537,7 +596,7 @@ Transform placedGrid(const Transform& placed,int originalWidth,int originalHeigh
     if(!placed.valid()||originalWidth<1||originalHeight<1||rect.width<1||rect.height<1)throw std::runtime_error("Invalid filter placement");auto out=placed;out.width=rect.width*placed.width/originalWidth;out.height=rect.height*placed.height/originalHeight;auto middle=placed.fromUnit({(rect.x+rect.width/2.)/originalWidth,(rect.y+rect.height/2.)/originalHeight});out.x=middle.x-out.width/2;out.y=middle.y-out.height/2;if(!out.valid())throw std::runtime_error("Expanded filter transform exceeds document limits");return out;
 }
 std::shared_ptr<const Raster> runPixels(Kind kind,const Raster& source,const Settings& raw,double scale,std::uint32_t seed,const GrayRaster* selection,const Limits& limits,LayerSides clamp){
-    kindCheck(kind);cancel(limits);count(source.width,source.height,limits,kind==Kind::LensEffects?192:kind==Kind::ProgressiveBlur?96:kind==Kind::ContentAwareFill?32:24);if(!std::isfinite(scale)||scale<=0||scale>64)throw std::runtime_error("Invalid filter preview scale");if(selection){checkSelection(*selection);if(selection->width!=source.width||selection->height!=source.height)throw std::runtime_error("Filter selection dimensions differ");}
+    kindCheck(kind);cancel(limits);count(source.width,source.height,limits,kind==Kind::LensEffects?192:kind==Kind::ProgressiveBlur?96:(kind==Kind::ContentAwareFill||kind==Kind::ReduceNoise)?32:24);if(!std::isfinite(scale)||scale<=0||scale>64)throw std::runtime_error("Invalid filter preview scale");if(selection){checkSelection(*selection);if(selection->width!=source.width||selection->height!=source.height)throw std::runtime_error("Filter selection dimensions differ");}
     if(kind==Kind::ContentAwareFill&&!selection)throw std::runtime_error("Content-Aware Fill needs a selection");const auto s=raw.normalized();auto original=source.rgba();cancel(limits);const int w=source.width,h=source.height;if(finishingIdentity(kind,s))return Raster::fromRgba(w,h,original.data(),std::size_t(w)*4);auto result=original;cancel(limits);
     if(selection&&empty(*selection))return Raster::fromRgba(w,h,original.data(),std::size_t(w)*4);
     switch(kind){
@@ -554,6 +613,9 @@ std::shared_ptr<const Raster> runPixels(Kind kind,const Raster& source,const Set
         case Kind::Dither:dither(result,w,h,s,seed);break;
         case Kind::Scanlines:scanlines(result,w,h,s,limits);break;
         case Kind::LensEffects:{std::vector<float> input(original.size());for(std::size_t i=0;i<input.size();++i)input[i]=original[i]/255.f;auto output=lensPixels(input,w,h,s.lens,limits);for(std::size_t i=0;i<output.size();++i)result[i]=byte(output[i]*255);break;}
+        case Kind::Sharpen:sharpen(result,w,h,s,scale,limits);break;
+        case Kind::ReduceNoise:reduceNoise(result,w,h,s,scale,limits);break;
+        case Kind::RimLight:case Kind::VolumetricLight:throw std::runtime_error("A prepared lighting scene is required");
         case Kind::CameraRaw:break;
     }
     cancel(limits);if(selection)for(int y=0;y<h;++y){cancel(limits);for(int x=0;x<w;++x){auto i=std::size_t(y)*w+x;unsigned coverage=selection->pixels[i];for(int c=0;c<4;++c)result[i*4+c]=std::uint8_t((unsigned(result[i*4+c])*coverage+unsigned(original[i*4+c])*(255-coverage)+127)/255);}}
@@ -730,6 +792,8 @@ std::shared_ptr<const DeepImage> runDeepPixels(Kind kind,const DeepImage& source
         else if(kind==Kind::TonalContrast)tonalFloat(pixels,source.width,source.height,settings,scale,limits);
         else if(kind==Kind::Dither)ditherFloat(pixels,source.width,source.height,settings,seed);
         else if(kind==Kind::LensEffects)pixels=lensPixels(pixels,source.width,source.height,settings.lens,limits);
+        else if(kind==Kind::Sharpen)sharpen(pixels,source.width,source.height,settings,scale,limits,source.isHdr());
+        else if(kind==Kind::ReduceNoise)reduceNoiseDeep(pixels,source.width,source.height,settings,scale,limits,source.isHdr());
         else if(kind==Kind::Scanlines)scanlinesFloat(pixels,source.width,source.height,settings,limits);
         else throw std::runtime_error("Unsupported deep filter kind");
         result=deepFromFloats(source,pixels,limits);
@@ -777,6 +841,7 @@ Result apply(const Request& request){
     if(!std::isfinite(request.retainedBlurMargin)||request.retainedBlurMargin<0||request.retainedBlurMargin>maxRetainedMargin)throw std::runtime_error("Invalid retained blur margin");
     Result result{request.source,request.transform,{0,0,original.width,original.height},1,false,{}};auto settings=request.settings.normalized();if(request.selection){if(!request.selection->coverage)throw std::runtime_error("Present selection must have coverage");checkSelection(*request.selection->coverage);if(std::abs(std::int64_t(request.selection->originX))>30000||std::abs(std::int64_t(request.selection->originY))>30000)throw std::runtime_error("Source selection origin exceeds supported extent");if(empty(*request.selection->coverage))return result;}
     if(request.kind==Kind::CameraRaw)return applyCameraRaw(request,std::move(result));
+    if(isLighting(request))return applyLighting(request,std::move(result));
     if(request.kind==Kind::ContentAwareFill&&!request.selection)throw std::runtime_error("Content-Aware Fill needs a selection");if(request.kind==Kind::LensCorrection&&settings.distortion==0)return result;if(finishingIdentity(request.kind,settings))return result;
     PixelRect bounds{0,0,original.width,original.height};const bool grows=spreads(request.kind);
     const auto clamp=grows?canvasTouchingSides(request.transform,original.width,original.height,request.canvasWidth,request.canvasHeight):LayerSides{};

@@ -14,11 +14,11 @@ class ProjectSaveJob final:public QObject {
 public:
     struct Host {
         // Receives an empty string on success, otherwise the store's error message.
-        std::function<void(const QString& error)> completed;
+        std::function<void(const QString& error,std::string fingerprint)> completed;
         // Runs on the worker thread before the write. Tests use it to hold a write open.
         std::function<void()> beforeWrite;
     };
-    ProjectSaveJob(Document,std::string activeLayer,QString path,Host,QObject* parent);
+    ProjectSaveJob(Document,std::string activeLayer,QString path,Host,QObject* parent,bool macCompatible=false);
     ~ProjectSaveJob()override;
 private:
     struct Impl;

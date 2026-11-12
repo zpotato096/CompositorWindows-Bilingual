@@ -1,8 +1,10 @@
 #include "ProjectStore.h"
 #include "imaging/cmyk.h"
 #include "imaging/hdr_codec.h"
+#include "imaging/gif_codec.h"
 #include "imaging/win32_file_path.h"
 #include <QByteArray>
+#include <QCryptographicHash>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -86,7 +88,14 @@ void validateAdjustment(const QJsonObject&o){
     if(string(o["kind"])=="Lens Effects"&&(optional(o,"filterLayerSettings")||optional(object(o["filterLayerSettings"]),"lens")))fail("Lens Effects settings required");
     if(!optional(o,"filterLayerSettings")){auto layer=object(o["filterLayerSettings"]);if(!optional(layer,"lens"))validateLens(layer["lens"]);}
     if(string(o["kind"])=="Tonal Contrast"&&(optional(o,"filterLayerSettings")||optional(object(o["filterLayerSettings"]),"tonal")))fail("Tonal Contrast settings required");
-    enumValue(o["kind"],{"Hue/Saturation","Levels","Curves","Exposure","Gradient Map","Grain","Invert","Black & White","Color Balance","Gaussian Blur","Motion Blur","Add Noise","Progressive Blur","Bloom / Glow","RGB Split","Vignette","Tonal Contrast","Lens Effects"});hsvTriplet(o);boolean(o["colorize"]);
+    enumValue(o["kind"],{"Hue/Saturation","Levels","Curves","Exposure","Gradient Map","Grain","Invert","Black & White","Color Balance","Gaussian Blur","Motion Blur","Add Noise","Progressive Blur","Bloom / Glow","RGB Split","Vignette","Tonal Contrast","Lens Effects","Sharpen","Reduce Noise"});hsvTriplet(o);boolean(o["colorize"]);
+    const auto detail=o["filterLayerSettings"].toObject();
+    if(!optional(detail,"sharpen")){
+        auto sharp=object(detail["sharpen"]);bounded(sharp["amount"],0,300);bounded(sharp["radius"],.1,20);
+    }
+    if(!optional(detail,"reduceNoise")){
+        auto noise=object(detail["reduceNoise"]);for(auto field:{"strength","details","color"})bounded(noise[field],0,100);
+    }
     auto levels=object(o["levels"]);channel(levels["channel"]);auto ranges=array(levels["ranges"]);if(ranges.size()!=4)fail("Levels needs four ranges");
     for(auto v:ranges){auto r=object(v);auto black=bounded(r["black"],0,254);bounded(r["white"],black+1,255);bounded(r["gamma"],.1,9.99);bounded(r["outputBlack"],0,255);bounded(r["outputWhite"],0,255);}
     auto curves=object(o["curves"]);channel(curves["channel"]);auto channels=array(curves["channels"]);if(channels.size()!=4)fail("Curves needs four channels");
@@ -123,7 +132,7 @@ bool textUsesExtended(const TextContent& text){if(text.alignment!=TextAlignment:
 TextRun readRun(const QJsonObject&o,int units,bool font,int version){TextRun run;run.location=integer(o["location"],0,units);run.length=integer(o["length"],0,units-run.location);if(!font){run.hasColor=true;run.red=bounded(o["red"],0,1);run.green=bounded(o["green"],0,1);run.blue=bounded(o["blue"],0,1);}else{run.hasFont=true;run.fontFamily=string(o["fontFamily"]).toUtf8().toStdString();if(run.fontFamily.empty()||run.fontFamily.size()>256)fail("Invalid font run");run.fontSize=bounded(o["fontSize"],1,1000);if(!optional(o,"fontStyle")){if(version<12)fail("Font style requires format v12");run.fontStyle=string(o["fontStyle"]).toUtf8().toStdString();if(run.fontStyle.empty()||run.fontStyle.size()>256)fail("Invalid font style");}}return run;}
 std::vector<TextRun> readRuns(const QJsonObject&o,const char*key,int units,bool font,int version){std::vector<TextRun> runs;if(optional(o,key))return runs;auto values=array(o[key]);if(values.size()>256)fail("Too many text runs");for(auto value:values)runs.push_back(readRun(object(value),units,font,version));return runs;}
 QJsonObject parseJson(const QByteArray&bytes){QJsonParseError error;auto json=QJsonDocument::fromJson(bytes,&error);if(error.error!=QJsonParseError::NoError||!json.isObject())fail("Invalid JSON object");return json.object();}
-int formatVersion(const Document&d){int version=d.cmykProfile?15:7;if(!d.guides.empty())version=std::max(version,8);for(const auto&l:d.layers){if(l.animation)version=std::max(version,18);if(l.deep)version=std::max(version,13);if(l.group&&l.opacity!=1)version=std::max(version,8);if(!l.adjustmentJson.empty()){auto a=parseJson(QByteArray::fromStdString(l.adjustmentJson));auto kind=string(a["kind"]);if(kind=="Lens Effects"||a.value("filterLayerSettings").toObject().contains("lens"))version=std::max(version,22);if(kind=="Tonal Contrast"||a.value("filterLayerSettings").toObject().contains("tonal"))version=std::max(version,21);if(kind=="Vignette"||a.value("filterLayerSettings").toObject().contains("vignette"))version=std::max(version,20);if(kind=="Gaussian Blur"||kind=="Motion Blur"||kind=="Add Noise")version=std::max(version,9);if(kind=="Progressive Blur"||kind=="Bloom / Glow"||kind=="RGB Split"||a.contains("filterLayerSettings"))version=std::max(version,16);}if(l.text){if(!l.text->colorRuns.empty())version=std::max(version,10);if(!l.text->fontRuns.empty())version=std::max(version,11);if(textUsesExtended(*l.text))version=std::max(version,12);}if(!l.shapeJson.empty()){
+int formatVersion(const Document&d){int version=d.cmykProfile?15:7;if(!d.guides.empty())version=std::max(version,8);for(const auto&l:d.layers){if(l.animation)version=std::max(version,18);if(l.deep)version=std::max(version,13);if(l.group&&l.opacity!=1)version=std::max(version,8);if(!l.adjustmentJson.empty()){auto a=parseJson(QByteArray::fromStdString(l.adjustmentJson));auto kind=string(a["kind"]);if(kind=="Sharpen")version=std::max(version,19);if(kind=="Reduce Noise")version=std::max(version,21);if(kind=="Lens Effects"||a.value("filterLayerSettings").toObject().contains("lens"))version=std::max(version,22);if(kind=="Tonal Contrast"||a.value("filterLayerSettings").toObject().contains("tonal"))version=std::max(version,21);if(kind=="Vignette"||a.value("filterLayerSettings").toObject().contains("vignette"))version=std::max(version,20);if(kind=="Gaussian Blur"||kind=="Motion Blur"||kind=="Add Noise")version=std::max(version,9);if(kind=="Progressive Blur"||kind=="Bloom / Glow"||kind=="RGB Split"||a.contains("filterLayerSettings"))version=std::max(version,16);}if(l.text){if(!l.text->colorRuns.empty())version=std::max(version,10);if(!l.text->fontRuns.empty())version=std::max(version,11);if(textUsesExtended(*l.text))version=std::max(version,12);}if(!l.shapeJson.empty()){
         const auto shape=parseJson(QByteArray::fromStdString(l.shapeJson));
         if(shape.contains("stroke"))version=std::max(version,14);
         if(l.raster&&(!optional(shape,"lineStyle")||!optional(shape,"lineCap")))version=std::max(version,19);
@@ -162,14 +171,102 @@ void graph(const Document&d){std::unordered_map<std::string,const Layer*> by;for
     for(auto&l:d.layers){std::unordered_set<std::string> seen{l.id};auto parent=l.parentId;while(!parent.empty()){if(seen.size()>64||!seen.insert(parent).second||!by.contains(parent)||!by.at(parent)->group)fail("Invalid folder hierarchy");parent=by.at(parent)->parentId;}if(l.group&&seen.size()>64)fail("Folder nesting exceeds limit");
         seen.clear();auto current=l.id;while(!current.empty()){if(seen.size()>=256||!seen.insert(current).second||!by.contains(current))fail("Invalid live-mask chain");auto&record=*by.at(current);if(!record.maskSourceId.empty()){if(record.group||!by.contains(record.maskSourceId)||by.at(record.maskSourceId)->group||!by.at(record.maskSourceId)->adjustmentJson.empty())fail("Invalid live-mask endpoint");}current=record.maskSourceId;}}
 }
-struct Manifest {OpenProject project;std::vector<std::string> images,masks;std::vector<std::vector<std::string>> animationImages;};
-Manifest decodeManifest(const QJsonObject&o){Manifest m;if(string(o["format"])!="com.compositor.project")fail("Invalid project format");int version=integer(o["version"],1,22);if(string(o["colorSpace"])!="sRGB")fail("Unsupported project color space");auto&d=m.project.document;m.project.readVersion=version;if(o.contains("cmykProfile")){if(version<15)fail("CMYK profiles require format v15");auto profile=object(o["cmykProfile"]);if(string(profile["file"])!="cmyk.icc")fail("Invalid CMYK profile asset");auto hash=string(profile["sha256"]);if(hash.size()!=64||std::any_of(hash.begin(),hash.end(),[](QChar c){return !QStringLiteral("0123456789abcdef").contains(c);}))fail("Invalid CMYK profile hash");auto name=string(profile["name"]);if(name.isEmpty()||name.size()>1024)fail("Invalid CMYK profile name");}d.id=uuid(o["documentID"]).toStdString();d.width=integer(o["width"],1,30000);d.height=integer(o["height"],1,30000);d.resolution=optionalNumber(o,"resolution",72);if(d.resolution<1||d.resolution>9600)fail("Invalid document resolution");m.project.activeLayer=optionalId(o,"activeLayerID");auto layers=array(o["layers"]);if(layers.size()>10000)fail("Layer count exceeds limit");
-    for(auto value:layers){auto r=object(value);if(!optional(r,"gif"))fail("Animated GIF layers are not supported by this version of CompositorWindows");Layer l;l.id=uuid(r["id"]).toStdString();l.name=string(r["name"]).toUtf8().toStdString();if(qstr(l.name).trimmed().isEmpty()||l.name.size()>16384)fail("Invalid layer name");l.visible=boolean(r["isVisible"]);l.transform=transform(r["transform"]);l.parentId=optionalId(r,"parentID");l.group=optionalBool(r,"isGroup",false);l.opacity=optionalNumber(r,"opacity",1);if(l.opacity<0||l.opacity>1)fail("Invalid layer opacity");if(l.group&&l.opacity!=1&&version<8)fail("Folder opacity requires format v8");if(!optional(r,"blendMode")){auto blend=string(r["blendMode"]);auto it=std::find_if(blendNames.begin(),blendNames.end(),[&](const char*n){return blend==n;});if(it==blendNames.end())fail("Unknown blend mode");l.blend=Blend(it-blendNames.begin());}
+struct MacGif {
+    std::string source;
+    int selected{};
+    std::optional<std::array<double,6>> affine;
+    int width{},height{};
+    bool nearest{};
+    std::unordered_map<int,std::string> pixels;
+    std::unordered_set<int> deleted;
+    std::vector<std::pair<int,int>> order;
+    std::optional<int> uniformDelay;
+    std::unordered_map<int,int> delays;
+};
+struct Manifest {
+    OpenProject project;
+    std::vector<std::string> images,masks;
+    std::vector<std::vector<std::string>> animationImages;
+    std::vector<std::optional<MacGif>> macGifs;
+};
+
+MacGif decodeMacGif(const QJsonObject& record,const std::string& id){
+    MacGif gif;
+    gif.source=string(record["sourceFile"]).toStdString();
+    if(gif.source!=id+".gif")fail("Invalid Mac GIF source filename");
+    gif.selected=integer(record["selectedFrameIndex"],0,8191);
+    if(!optional(record,"geometry")){
+        const auto g=object(record["geometry"]);
+        gif.width=integer(g["width"],1,30000);gif.height=integer(g["height"],1,30000);
+        if(std::uint64_t(gif.width)*gif.height>maxDocumentImagePixels)fail("Mac GIF frame is too large");
+        gif.affine=std::array<double,6>{bounded(g["a"],-1e6,1e6),bounded(g["b"],-1e6,1e6),bounded(g["c"],-1e6,1e6),
+            bounded(g["d"],-1e6,1e6),bounded(g["tx"],-1e6,1e6),bounded(g["ty"],-1e6,1e6)};
+        const auto [a,b,c,d,tx,ty]=*gif.affine;
+        if(std::abs(a*d-b*c)<=1e-15)fail("Invalid Mac GIF frame transform");
+        if(!optional(g,"sampling")){enumValue(g["sampling"],{"Nearest","Smooth","High quality"});gif.nearest=g["sampling"].toString()=="Nearest";}
+    }
+    auto entries=[&](const char* field){auto values=optional(record,field)?QJsonArray{}:array(record[field]);if(values.size()>4096)fail("Mac GIF timeline is too large");return values;};
+    for(auto value:entries("framePixels")){
+        const auto frame=object(value);const auto index=integer(frame["index"],0,8191);const auto file=string(frame["imageFile"]).toStdString();
+        if(file!=id+".frame-"+std::to_string(index)+".png"||!gif.pixels.emplace(index,file).second)fail("Invalid Mac GIF edited frame filename");
+    }
+    for(auto value:entries("deletedFrameIndices"))
+        if(!gif.deleted.insert(integer(value,0,4095)).second)fail("Duplicate Mac GIF frame deletion");
+    std::unordered_set<int> ids;
+    const auto order=entries("frameOrder");
+    if(!optional(record,"frameOrder")&&order.empty())fail("Empty Mac GIF frame order");
+    for(auto value:order){
+        const auto frame=object(value);const auto index=integer(frame["index"],0,8191);
+        if(!ids.insert(index).second)fail("Duplicate Mac GIF frame identity");
+        gif.order.emplace_back(index,integer(frame["sourceIndex"],0,4095));
+    }
+    if(!optional(record,"timing")){
+        const auto timing=object(record["timing"]);
+        const auto milliseconds=[](QJsonValue v){return int(std::lround(1000*bounded(v,.02,655.35)));};
+        enumValue(timing["mode"],{"Frame delay","Same for all"});
+        const auto uniform=milliseconds(timing["uniformDelay"]);
+        if(timing["mode"].toString()=="Same for all")gif.uniformDelay=uniform;
+        const auto delays=array(timing["frameDelays"]);
+        if(delays.size()>4096)fail("Too many Mac GIF frame delays");
+        for(auto value:delays){
+            const auto delay=object(value);
+            if(!gif.delays.emplace(integer(delay["index"],0,8191),milliseconds(delay["duration"])).second)fail("Duplicate Mac GIF frame delay");
+        }
+    }
+    return gif;
+}
+
+std::shared_ptr<const Raster> macGifFrame(const imaging::RgbaImage& frame,const MacGif& gif){
+    if(!gif.affine)return Raster::fromRgba(int(frame.width),int(frame.height),frame.pixels.data(),frame.stride);
+    const auto [a,b,c,d,tx,ty]=*gif.affine;
+    const auto determinant=a*d-b*c;
+    std::vector<uint8_t> pixels(std::size_t(gif.width)*gif.height*4);
+    const auto read=[&](int x,int y,int channel){
+        if(x<0||y<0||x>=int(frame.width)||y>=int(frame.height))return 0.;
+        return double(frame.pixels[std::size_t(y)*frame.stride+std::size_t(x)*4+channel]);
+    };
+    for(int y=0;y<gif.height;++y)for(int x=0;x<gif.width;++x){
+        const double u=(x+.5)/gif.width-tx,v=1-(y+.5)/gif.height-ty;
+        const double fx=(d*u-c*v)/determinant*frame.width-.5,fy=(1-(-b*u+a*v)/determinant)*frame.height-.5;
+        if(fx< -1||fy< -1||fx>=frame.width||fy>=frame.height)continue;
+        auto* output=pixels.data()+(std::size_t(y)*gif.width+x)*4;
+        if(gif.nearest){for(int channel=0;channel<4;++channel)output[channel]=uint8_t(read(int(std::lround(fx)),int(std::lround(fy)),channel));continue;}
+        const int left=int(std::floor(fx)),top=int(std::floor(fy));
+        for(int channel=0;channel<4;++channel){
+            const auto above=std::lerp(read(left,top,channel),read(left+1,top,channel),fx-left);
+            const auto below=std::lerp(read(left,top+1,channel),read(left+1,top+1,channel),fx-left);
+            output[channel]=uint8_t(std::lround(std::lerp(above,below,fy-top)));
+        }
+    }
+    return Raster::fromRgba(gif.width,gif.height,pixels.data(),std::size_t(gif.width)*4);
+}
+Manifest decodeManifest(const QJsonObject&o){Manifest m;if(string(o["format"])!="com.compositor.project")fail("Invalid project format");int version=integer(o["version"],1,27);if(version>22&&version!=27)fail("Unsupported project format version");if(string(o["colorSpace"])!="sRGB")fail("Unsupported project color space");auto&d=m.project.document;m.project.readVersion=version;if(o.contains("cmykProfile")){if(version<15)fail("CMYK profiles require format v15");auto profile=object(o["cmykProfile"]);if(string(profile["file"])!="cmyk.icc")fail("Invalid CMYK profile asset");auto hash=string(profile["sha256"]);if(hash.size()!=64||std::any_of(hash.begin(),hash.end(),[](QChar c){return !QStringLiteral("0123456789abcdef").contains(c);}))fail("Invalid CMYK profile hash");auto name=string(profile["name"]);if(name.isEmpty()||name.size()>1024)fail("Invalid CMYK profile name");}d.id=uuid(o["documentID"]).toStdString();d.width=integer(o["width"],1,30000);d.height=integer(o["height"],1,30000);d.resolution=optionalNumber(o,"resolution",72);if(d.resolution<1||d.resolution>9600)fail("Invalid document resolution");m.project.activeLayer=optionalId(o,"activeLayerID");auto layers=array(o["layers"]);if(layers.size()>10000)fail("Layer count exceeds limit");
+    for(auto value:layers){auto r=object(value);Layer l;l.id=uuid(r["id"]).toStdString();l.name=string(r["name"]).toUtf8().toStdString();if(qstr(l.name).trimmed().isEmpty()||l.name.size()>16384)fail("Invalid layer name");l.visible=boolean(r["isVisible"]);l.transform=transform(r["transform"]);l.parentId=optionalId(r,"parentID");l.group=optionalBool(r,"isGroup",false);l.opacity=optionalNumber(r,"opacity",1);if(l.opacity<0||l.opacity>1)fail("Invalid layer opacity");if(l.group&&l.opacity!=1&&version<8)fail("Folder opacity requires format v8");if(!optional(r,"blendMode")){auto blend=string(r["blendMode"]);auto it=std::find_if(blendNames.begin(),blendNames.end(),[&](const char*n){return blend==n;});if(it==blendNames.end())fail("Unknown blend mode");l.blend=Blend(it-blendNames.begin());}
         if(version<3&&(l.opacity!=1||l.blend!=Blend::Normal))fail("Appearance requires format v3");if(version==1&&(!l.parentId.empty()||l.group))fail("Groups require format v2");
         auto image=optional(r,"imageFile")?std::string{}:string(r["imageFile"]).toStdString();if(!image.empty()&&image!=l.id+".png"&&!(version>=13&&image==l.id+".exr"))fail("Invalid image filename");if(!optional(r,"imageFile")&&image.empty())fail("Invalid image filename");if(l.group&&!image.empty())fail("Folder cannot carry image pixels");
         auto mask=optional(r,"maskFile")?std::string{}:string(r["maskFile"]).toStdString();if(!optional(r,"maskFile")&&(mask!=l.id+".mask.png"||version<(l.group?6:4)))fail("Invalid mask filename or version");if(!optional(r,"maskEnabled")&&mask.empty())fail("Mask enabled flag without mask");
         bool linked=optionalBool(r,"maskLinked",true);bool enabled=optionalBool(r,"maskEnabled",true);std::optional<Transform> placement;if(!optional(r,"maskPlacement")){placement=transform(r["maskPlacement"]);if(mask.empty())fail("Mask placement without mask");}if(!mask.empty())l.mask=Mask{nullptr,enabled,linked,placement};
-        l.maskSourceId=optionalId(r,"maskSourceID");if(version<5&&!l.maskSourceId.empty())fail("Live masks require format v5");if(!optional(r,"adjustment")){auto a=object(r["adjustment"]);validateAdjustment(a);if(version<7||l.group||!image.empty())fail("Invalid adjustment layer");l.adjustmentJson=jsonString(a);auto kind=string(a["kind"]);if((kind=="Lens Effects"||a.value("filterLayerSettings").toObject().contains("lens"))&&version<22)fail("Lens Effects adjustments require format v22");if((kind=="Tonal Contrast"||a.value("filterLayerSettings").toObject().contains("tonal"))&&version<21)fail("Tonal Contrast adjustments require format v21");if((kind=="Vignette"||a.value("filterLayerSettings").toObject().contains("vignette"))&&version<20)fail("Vignette adjustments require format v20");if((kind=="Gaussian Blur"||kind=="Motion Blur"||kind=="Add Noise")&&version<9)fail("Blur and noise adjustments require format v9");if((kind=="Progressive Blur"||kind=="Bloom / Glow"||kind=="RGB Split"||a.contains("filterLayerSettings"))&&version<16)fail("Filter adjustment layers require format v16");}if(!optional(r,"shape")){auto s=object(r["shape"]);validateShape(s,version);if(!image.empty())l.shapeJson=jsonString(s);}if(!optional(r,"effects")){if(l.group)fail("Folder cannot carry effects");readEffects(object(r["effects"]),l.effects);}if(!optional(r,"text")){if(l.group)fail("Folder cannot carry text");auto t=object(r["text"]);TextContent text;text.value=string(t["text"]).toUtf8().toStdString();if(text.value.size()>100000)fail("Text exceeds limit");text.fontFamily=string(t["fontFamily"]).toUtf8().toStdString();if(text.fontFamily.empty()||text.fontFamily.size()>256)fail("Invalid font");text.fontSize=bounded(t["fontSize"],1,1000);text.red=bounded(t["red"],0,1);text.green=bounded(t["green"],0,1);text.blue=bounded(t["blue"],0,1);text.alpha=optionalNumber(t,"alpha",1);if(text.alpha<0||text.alpha>1)fail("Invalid text alpha");int units=QString::fromUtf8(text.value.c_str()).size();if(!optional(t,"colorRuns")&&version<10)fail("Color runs require format v10");if(!optional(t,"fontRuns")&&version<11)fail("Font runs require format v11");text.colorRuns=readRuns(t,"colorRuns",units,false,version);text.fontRuns=readRuns(t,"fontRuns",units,true,version);auto paragraph=[&](const char* key){if(!optional(t,key)&&version<12)fail("Paragraph text requires format v12");};paragraph("alignment");paragraph("tracking");paragraph("leading");paragraph("boxSize");paragraph("fontStyle");if(!optional(t,"fontStyle")){text.fontStyle=string(t["fontStyle"]).toUtf8().toStdString();if(text.fontStyle.empty()||text.fontStyle.size()>256)fail("Invalid font style");}if(!optional(t,"alignment")){auto name=string(t["alignment"]);if(name=="Left")text.alignment=TextAlignment::Left;else if(name=="Center")text.alignment=TextAlignment::Center;else if(name=="Right")text.alignment=TextAlignment::Right;else fail("Unknown text alignment");}if(!optional(t,"tracking"))text.tracking=bounded(t["tracking"],-100,1000);if(!optional(t,"leading"))text.leading=bounded(t["leading"],0,5000);if(!optional(t,"boxSize")){auto box=object(t["boxSize"]);text.boxWidth=bounded(box["width"],16,30000);text.boxHeight=bounded(box["height"],16,30000);}l.text=std::move(text);}
+        l.maskSourceId=optionalId(r,"maskSourceID");if(version<5&&!l.maskSourceId.empty())fail("Live masks require format v5");if(!optional(r,"adjustment")){auto a=object(r["adjustment"]);validateAdjustment(a);if(version<7||l.group||!image.empty())fail("Invalid adjustment layer");l.adjustmentJson=jsonString(a);auto kind=string(a["kind"]);if(kind=="Sharpen"&&version<19)fail("Sharpen adjustments require format v19");if(kind=="Reduce Noise"&&version<21)fail("Reduce Noise adjustments require format v21");if((kind=="Lens Effects"||a.value("filterLayerSettings").toObject().contains("lens"))&&version<18)fail("Lens Effects adjustments require format v18 or later");if((kind=="Tonal Contrast"||a.value("filterLayerSettings").toObject().contains("tonal"))&&version<18)fail("Tonal Contrast adjustments require format v18 or later");if((kind=="Vignette"||a.value("filterLayerSettings").toObject().contains("vignette"))&&version<18)fail("Vignette adjustments require format v18 or later");if((kind=="Gaussian Blur"||kind=="Motion Blur"||kind=="Add Noise")&&version<9)fail("Blur and noise adjustments require format v9");if((kind=="Progressive Blur"||kind=="Bloom / Glow"||kind=="RGB Split"||a.contains("filterLayerSettings"))&&version<16)fail("Filter adjustment layers require format v16");}if(!optional(r,"shape")){auto s=object(r["shape"]);validateShape(s,version);if(!image.empty())l.shapeJson=jsonString(s);}if(!optional(r,"effects")){if(l.group)fail("Folder cannot carry effects");readEffects(object(r["effects"]),l.effects);}if(!optional(r,"text")){if(l.group)fail("Folder cannot carry text");auto t=object(r["text"]);TextContent text;text.value=string(t["text"]).toUtf8().toStdString();if(text.value.size()>100000)fail("Text exceeds limit");text.fontFamily=string(t["fontFamily"]).toUtf8().toStdString();if(text.fontFamily.empty()||text.fontFamily.size()>256)fail("Invalid font");text.fontSize=bounded(t["fontSize"],1,1000);text.red=bounded(t["red"],0,1);text.green=bounded(t["green"],0,1);text.blue=bounded(t["blue"],0,1);text.alpha=optionalNumber(t,"alpha",1);if(text.alpha<0||text.alpha>1)fail("Invalid text alpha");int units=QString::fromUtf8(text.value.c_str()).size();if(!optional(t,"colorRuns")&&version<10)fail("Color runs require format v10");if(!optional(t,"fontRuns")&&version<11)fail("Font runs require format v11");text.colorRuns=readRuns(t,"colorRuns",units,false,version);text.fontRuns=readRuns(t,"fontRuns",units,true,version);auto paragraph=[&](const char* key){if(!optional(t,key)&&version<12)fail("Paragraph text requires format v12");};paragraph("alignment");paragraph("tracking");paragraph("leading");paragraph("boxSize");paragraph("fontStyle");if(!optional(t,"fontStyle")){text.fontStyle=string(t["fontStyle"]).toUtf8().toStdString();if(text.fontStyle.empty()||text.fontStyle.size()>256)fail("Invalid font style");}if(!optional(t,"alignment")){auto name=string(t["alignment"]);if(name=="Left")text.alignment=TextAlignment::Left;else if(name=="Center")text.alignment=TextAlignment::Center;else if(name=="Right")text.alignment=TextAlignment::Right;else fail("Unknown text alignment");}if(!optional(t,"tracking"))text.tracking=bounded(t["tracking"],-100,1000);if(!optional(t,"leading"))text.leading=bounded(t["leading"],0,5000);if(!optional(t,"boxSize")){auto box=object(t["boxSize"]);text.boxWidth=bounded(box["width"],16,30000);text.boxHeight=bounded(box["height"],16,30000);}l.text=std::move(text);}
         std::vector<std::string> frameImages;
         if(!optional(r,"windowsGif")){
             if(version<18||l.group||image.empty()||!l.adjustmentJson.empty()||!l.shapeJson.empty()||l.text||image.ends_with(".exr"))fail("Invalid animated GIF layer");
@@ -183,17 +280,32 @@ Manifest decodeManifest(const QJsonObject&o){Manifest m;if(string(o["format"])!=
             }
             l.animation=std::move(animation);
         }
+        std::optional<MacGif> macGif;
+        if(!optional(r,"gif")){
+            if(version<17||l.animation||l.group||!image.ends_with(".png")||!l.adjustmentJson.empty()||!l.shapeJson.empty()||l.text)
+                fail("Invalid Mac animated GIF layer");
+            macGif=decodeMacGif(object(r["gif"]),l.id);
+        }
+        m.macGifs.push_back(std::move(macGif));
         m.images.push_back(image);m.masks.push_back(mask);m.animationImages.push_back(std::move(frameImages));d.layers.push_back(std::move(l));}
     if(!optional(o,"guides")){if(version<8)fail("Guides require format v8");auto guides=array(o["guides"]);if(guides.size()>1000)fail("Guide count exceeds limit");for(auto value:guides){auto g=object(value);Guide guide;guide.id=uuid(g["id"]).toStdString();auto orientation=string(g["orientation"]);if(orientation=="horizontal")guide.horizontal=true;else if(orientation=="vertical")guide.horizontal=false;else fail("Unknown guide orientation");guide.position=number(g["position"]);if(std::abs(guide.position)>1000000)fail("Invalid guide");d.guides.push_back(std::move(guide));}}
     graph(d);if(!m.project.activeLayer.empty()&&std::none_of(d.layers.begin(),d.layers.end(),[&](auto&l){return l.id==m.project.activeLayer;}))fail("Active layer does not exist");return m;
 }
-QJsonObject encodeManifest(const Document&d,const std::string&active){QJsonArray layers;for(auto&l:d.layers){if(!l.transform.valid())fail("Invalid transform");QJsonObject r{{"id",qstr(l.id)},{"name",qstr(l.name)},{"isVisible",l.visible},{"transform",encodeTransform(l.transform)},{"isGroup",l.group},{"opacity",l.opacity},{"blendMode",blendNames.at(size_t(l.blend))}};if(l.raster)r["imageFile"]=qstr(l.id+(l.deep&&l.deep->isHdr()?".exr":".png"));if(!l.parentId.empty())r["parentID"]=qstr(l.parentId);if(!l.maskSourceId.empty())r["maskSourceID"]=qstr(l.maskSourceId);if(l.mask){if(!l.mask->raster)fail("Missing mask raster");r["maskFile"]=qstr(l.id+".mask.png");r["maskEnabled"]=l.mask->enabled;r["maskLinked"]=l.mask->linked;if(l.mask->placement)r["maskPlacement"]=encodeTransform(*l.mask->placement);}if(!l.adjustmentJson.empty())r["adjustment"]=parseJson(QByteArray::fromStdString(l.adjustmentJson));if(!l.shapeJson.empty()&&l.raster)r["shape"]=parseJson(QByteArray::fromStdString(l.shapeJson));if(l.effects.specified)r["effects"]=encodeEffects(l.effects);if(l.animation){
+QJsonObject encodeManifest(const Document&d,const std::string&active,bool macCompatible=false){QJsonArray layers;for(auto&l:d.layers){if(!l.transform.valid())fail("Invalid transform");QJsonObject r{{"id",qstr(l.id)},{"name",qstr(l.name)},{"isVisible",l.visible},{"transform",encodeTransform(l.transform)},{"isGroup",l.group},{"opacity",l.opacity},{"blendMode",blendNames.at(size_t(l.blend))}};if(l.raster)r["imageFile"]=qstr(l.id+(l.deep&&l.deep->isHdr()?".exr":".png"));if(!l.parentId.empty())r["parentID"]=qstr(l.parentId);if(!l.maskSourceId.empty())r["maskSourceID"]=qstr(l.maskSourceId);if(l.mask){if(!l.mask->raster)fail("Missing mask raster");r["maskFile"]=qstr(l.id+".mask.png");r["maskEnabled"]=l.mask->enabled;r["maskLinked"]=l.mask->linked;if(l.mask->placement)r["maskPlacement"]=encodeTransform(*l.mask->placement);}if(!l.adjustmentJson.empty())r["adjustment"]=parseJson(QByteArray::fromStdString(l.adjustmentJson));if(!l.shapeJson.empty()&&l.raster)r["shape"]=parseJson(QByteArray::fromStdString(l.shapeJson));if(l.effects.specified)r["effects"]=encodeEffects(l.effects);if(l.animation){
         const auto& animation=*l.animation;if(!l.raster||l.deep||l.group||!l.adjustmentJson.empty()||!l.shapeJson.empty()||l.text||animation.frames.empty()||animation.frames.size()>4096||animation.selectedFrame>=animation.frames.size())fail("Invalid animated GIF layer");
         QJsonArray frames;for(size_t i=0;i<animation.frames.size();++i){const auto& frame=animation.frames[i];if(!frame.raster||frame.delayMs<0||frame.delayMs>655350)fail("Invalid animation frame");
             frames.append(QJsonObject{{"imageFile",qstr(i==animation.selectedFrame?l.id+".png":l.id+".frame-"+std::to_string(i)+".png")},{"delayMs",frame.delayMs}});}
-        r["windowsGif"]=QJsonObject{{"selectedFrame",int(animation.selectedFrame)},{"frames",frames}};
+        if(macCompatible){
+            QJsonArray pixels,delays;
+            for(std::size_t i=0;i<animation.frames.size();++i){
+                pixels.append(QJsonObject{{"index",int(i)},{"imageFile",qstr(l.id+".frame-"+std::to_string(i)+".png")}});
+                delays.append(QJsonObject{{"index",int(i)},{"duration",std::max(20,animation.frames[i].delayMs)/1000.}});
+            }
+            r["gif"]=QJsonObject{{"sourceFile",qstr(l.id+".gif")},{"selectedFrameIndex",int(animation.selectedFrame)},
+                {"framePixels",pixels},{"timing",QJsonObject{{"mode","Frame delay"},{"uniformDelay",.1},{"frameDelays",delays}}}};
+        }else r["windowsGif"]=QJsonObject{{"selectedFrame",int(animation.selectedFrame)},{"frames",frames}};
     }if(l.text){QJsonObject t{{"text",qstr(l.text->value)},{"fontFamily",qstr(l.text->fontFamily)},{"fontSize",l.text->fontSize},{"red",l.text->red},{"green",l.text->green},{"blue",l.text->blue},{"alpha",l.text->alpha}};auto writeRuns=[&](const char*key,const std::vector<TextRun>&values,bool font){if(values.empty())return;QJsonArray items;for(const auto&run:values){QJsonObject item{{"location",run.location},{"length",run.length}};if(font){item["fontFamily"]=qstr(run.fontFamily);item["fontSize"]=run.fontSize;if(!regularStyle(run.fontStyle))item["fontStyle"]=qstr(run.fontStyle);}else{item["red"]=run.red;item["green"]=run.green;item["blue"]=run.blue;}items.append(item);}t[key]=items;};writeRuns("colorRuns",l.text->colorRuns,false);writeRuns("fontRuns",l.text->fontRuns,true);if(!regularStyle(l.text->fontStyle))t["fontStyle"]=qstr(l.text->fontStyle);if(l.text->alignment==TextAlignment::Center)t["alignment"]="Center";else if(l.text->alignment==TextAlignment::Right)t["alignment"]="Right";if(l.text->tracking!=0)t["tracking"]=l.text->tracking;if(l.text->leading!=0)t["leading"]=l.text->leading;if(l.text->boxWidth&&l.text->boxHeight)t["boxSize"]=QJsonObject{{"width",*l.text->boxWidth},{"height",*l.text->boxHeight}};r["text"]=t;}layers.append(r);}
-    QJsonObject result{{"format","com.compositor.project"},{"version",formatVersion(d)},{"colorSpace","sRGB"},{"resolution",d.resolution},{"documentID",qstr(d.id)},{"width",d.width},{"height",d.height},{"layers",layers}};if(!active.empty())result["activeLayerID"]=qstr(active);if(!d.guides.empty()){QJsonArray guides;for(const auto&guide:d.guides)guides.append(QJsonObject{{"id",qstr(guide.id)},{"orientation",guide.horizontal?"horizontal":"vertical"},{"position",guide.position}});result["guides"]=guides;}if(d.cmykProfile)result["cmykProfile"]=QJsonObject{{"file","cmyk.icc"},{"name",qstr(d.cmykProfile->name)},{"sha256",qstr(d.cmykProfile->sha256)}};decodeManifest(result);graph(d);return result;}
+    QJsonObject result{{"format","com.compositor.project"},{"version",macCompatible?21:formatVersion(d)},{"colorSpace","sRGB"},{"resolution",d.resolution},{"documentID",qstr(d.id)},{"width",d.width},{"height",d.height},{"layers",layers}};if(!active.empty())result["activeLayerID"]=qstr(active);if(!d.guides.empty()){QJsonArray guides;for(const auto&guide:d.guides)guides.append(QJsonObject{{"id",qstr(guide.id)},{"orientation",guide.horizontal?"horizontal":"vertical"},{"position",guide.position}});result["guides"]=guides;}if(d.cmykProfile)result["cmykProfile"]=QJsonObject{{"file","cmyk.icc"},{"name",qstr(d.cmykProfile->name)},{"sha256",qstr(d.cmykProfile->sha256)}};decodeManifest(result);graph(d);return result;}
 fs::path marker(const fs::path&p){return p/L".compositor-transaction";}
 bool owns(const fs::path&p,const std::string&tx){return existsPath(marker(p))&&readFile(marker(p),128).toStdString()==tx;}
 struct Journal {std::string tx,phase;bool original{};fs::path stage,backup;};
@@ -206,7 +318,7 @@ ProjectStore::ProjectStore(ProjectAssetCodec codec,SaveFaultInjector fault):code
 OpenProject ProjectStore::loadPackage(const fs::path&p)const{safeTree(p);if(!isDir(p))fail("Project is not a directory package");auto json=parseJson(readFile(p/L"manifest.json",manifestLimit));auto parsed=decodeManifest(json);uint64_t images=0,masks=0;
     if(json.contains("cmykProfile")){auto metadata=object(json["cmykProfile"]);auto file=p/L"cmyk.icc";noReparse(file);if(!isFile(file))fail("Missing CMYK profile asset");auto bytes=readFile(file,imaging::maxCmykProfileBytes);auto profile=imaging::makeCmykProfile(std::span(reinterpret_cast<const uint8_t*>(bytes.data()),size_t(bytes.size())),string(metadata["name"]).toStdString());if(qstr(profile->sha256)!=string(metadata["sha256"]))fail("CMYK profile checksum mismatch");parsed.project.document.cmykProfile=std::move(profile);}
     // Inspect all headers and cumulative budgets before any decoder allocates image pixels.
-    const bool allow16=parsed.project.readVersion>=13;
+    const bool allow16=parsed.project.readVersion>=12;
     for(size_t i=0;i<parsed.project.document.layers.size();++i)for(bool gray:{false,true}){auto name=gray?parsed.masks[i]:parsed.images[i];if(name.empty())continue;auto path=p/L"images"/fs::path(qstr(name).toStdWString());noReparse(path);if(!isFile(path)||fileBytes(path)>assetLimit)fail("Embedded image is absent or oversized");auto header=(!gray&&path.extension()==L".exr")?[&]{auto e=imaging::inspectExr(path);return PngHeader{e.width,e.height,16};}():pngDimensions(path,gray,allow16&&!gray);if(!gray&&parsed.project.document.layers[i].animation&&header.bitDepth!=8)fail("Animation frames must be 8-bit PNG");dimension(header.width,header.height,gray?masks:images);}
     for(size_t i=0;i<parsed.project.document.layers.size();++i){const auto& l=parsed.project.document.layers[i];if(!l.animation)continue;
         for(size_t n=0;n<parsed.animationImages[i].size();++n){if(n==l.animation->selectedFrame)continue;auto path=p/L"images"/fs::path(qstr(parsed.animationImages[i][n]).toStdWString());noReparse(path);if(!isFile(path)||fileBytes(path)>assetLimit)fail("Animation frame is absent or oversized");auto header=pngDimensions(path,false,false);dimension(header.width,header.height,images);}}
@@ -214,6 +326,52 @@ OpenProject ProjectStore::loadPackage(const fs::path&p)const{safeTree(p);if(!isD
     for(size_t i=0;i<parsed.project.document.layers.size();++i){auto& l=parsed.project.document.layers[i];if(!l.animation)continue;
         for(size_t n=0;n<l.animation->frames.size();++n){auto& frame=l.animation->frames[n];if(n==l.animation->selectedFrame){frame.raster=l.raster;continue;}
             auto path=p/L"images"/fs::path(qstr(parsed.animationImages[i][n]).toStdWString());auto raster=codec_.readColor(path);if(!raster)fail("Animation frame decode failed");dimension(raster->width,raster->height,images);frame.raster=std::move(raster);}}
+    for(std::size_t i=0;i<parsed.macGifs.size();++i){
+        if(!parsed.macGifs[i])continue;
+        auto& l=parsed.project.document.layers[i];
+        const auto& gif=*parsed.macGifs[i];
+        if(!l.raster||l.deep)fail("Mac GIF requires an 8-bit selected-frame image");
+        auto imagePath=[&](const std::string& name){return p/L"images"/fs::path(qstr(name).toStdWString());};
+        const auto sourcePath=imagePath(gif.source);noReparse(sourcePath);
+        if(!isFile(sourcePath)||fileBytes(sourcePath)>assetLimit)fail("Mac GIF source is absent or oversized");
+        imaging::ImportOptions options;
+        const auto source=imaging::decodeGif(sourcePath,options);
+        const auto sourceCount=source.frames.size();
+        for(int index:gif.deleted)if(std::size_t(index)>=sourceCount)fail("Invalid Mac GIF frame deletion");
+        auto order=gif.order;
+        if(order.empty())for(std::size_t index=0;index<sourceCount;++index)
+            if(!gif.deleted.contains(int(index)))order.emplace_back(int(index),int(index));
+        if(order.empty())fail("Empty Mac GIF timeline");
+        const int width=gif.affine?gif.width:int(source.frames.front().image.width);
+        const int height=gif.affine?gif.height:int(source.frames.front().image.height);
+        if(l.raster->width!=width||l.raster->height!=height)fail("Mac GIF selected frame dimensions differ");
+        std::unordered_set<int> identities;
+        std::optional<std::size_t> selected;
+        GifAnimation animation;
+        for(const auto& [identity,sourceIndex]:order){
+            if(std::size_t(sourceIndex)>=sourceCount)fail("Mac GIF source frame is missing");
+            identities.insert(identity);
+            const auto& backing=source.frames[sourceIndex];
+            const auto delay=gif.delays.find(identity);
+            const auto milliseconds=gif.uniformDelay.value_or(delay!=gif.delays.end()?delay->second:std::max(20,int(backing.delayCentiseconds)*10));
+            std::shared_ptr<const Raster> raster;
+            if(identity==gif.selected){selected=animation.frames.size();raster=l.raster;}
+            else dimension(width,height,images);
+            if(const auto edit=gif.pixels.find(identity);edit!=gif.pixels.end()){
+                const auto file=imagePath(edit->second);noReparse(file);
+                if(!isFile(file)||fileBytes(file)>assetLimit)fail("Mac GIF edited frame is unavailable");
+                const auto header=pngDimensions(file,false,false);
+                if(header.width!=width||header.height!=height)fail("Mac GIF edited frame dimensions differ");
+                if(!raster)raster=codec_.readColor(file);
+            }else if(!raster)raster=macGifFrame(backing.image,gif);
+            if(!raster||raster->width!=width||raster->height!=height)fail("Mac GIF frame decode failed");
+            animation.frames.push_back({std::move(raster),milliseconds});
+        }
+        for(const auto& [index,file]:gif.pixels)if(!identities.contains(index))fail("Mac GIF edited frame is not in the timeline");
+        for(const auto& [index,delay]:gif.delays)if(!identities.contains(index))fail("Mac GIF delay is not in the timeline");
+        if(!selected)fail("Mac GIF selected frame is not in the timeline");
+        animation.selectedFrame=*selected;l.animation=std::move(animation);
+    }
     graph(parsed.project.document);return std::move(parsed.project);}
 void ProjectStore::recoverLocked(const fs::path&p){auto file=suffix(p,L".compositor-save.json");if(!existsPath(file))return;auto j=readJournal(p);safeTree(p);if(existsPath(j.stage)&&!owns(j.stage,j.tx))fail("Recovery stage ownership is unknown; preserving packages");if(existsPath(j.backup)){if(existsPath(p)){if(!owns(p,j.tx))fail("Recovery found an unrelated target; preserving all packages");try{loadPackage(p);}catch(...){if(existsPath(j.stage))fail("Recovery stage collision; preserving all packages");renamePath(p,j.stage);renamePath(j.backup,p);removeTree(j.stage);finishJournal(p,j.tx);return;}removeTree(j.backup);}else{renamePath(j.backup,p);}removeTree(j.stage);finishJournal(p,j.tx);return;}
     if(existsPath(p)){if(owns(p,j.tx)){loadPackage(p);}else if(!j.original)fail("Recovery target ownership is unknown");removeTree(j.stage);finishJournal(p,j.tx);return;}
@@ -221,17 +379,103 @@ void ProjectStore::recoverLocked(const fs::path&p){auto file=suffix(p,L".composi
 }
 void ProjectStore::recover(const fs::path&path){auto p=normalize(path);Lock lock(p);recoverLocked(p);}
 OpenProject ProjectStore::load(const fs::path&path){auto p=normalize(path);Lock lock(p);recoverLocked(p);return loadPackage(p);}
-void ProjectStore::save(const fs::path&path,const Document&document,const std::string&active){auto p=normalize(path);Lock lock(p);recoverLocked(p);auto manifest=encodeManifest(document,active);Journal j;j.tx=newId();j.phase="prepared";j.original=existsPath(p);if(j.original)safeTree(p);j.stage=suffix(p,L".stage-"+qstr(j.tx).toStdWString());j.backup=suffix(p,L".backup-"+qstr(j.tx).toStdWString());if(existsPath(j.stage)||existsPath(j.backup))fail("Save transaction name collision");
+namespace {
+std::string packageFingerprint(const fs::path& path){
+    safeTree(path);
+    const auto contents=readFile(path/L"manifest.json",manifestLimit);
+    const auto json=parseJson(contents);
+    const auto manifest=decodeManifest(json);
+    QCryptographicHash result(QCryptographicHash::Sha256);
+    result.addData(QCryptographicHash::hash(contents,QCryptographicHash::Sha256));
+    std::unordered_set<std::string> seen;
+    auto addFile=[&](const fs::path& file,uintmax_t limit){
+        noReparse(file);
+        if(!isFile(file)||fileBytes(file)>limit)fail("A project asset is unavailable");
+        QFile source(qs(qtPath(file)));
+        QCryptographicHash digest(QCryptographicHash::Sha256);
+        if(!source.open(QIODevice::ReadOnly)||!digest.addData(&source))fail("Cannot read project asset");
+        result.addData(digest.result());
+    };
+    auto addImage=[&](const std::string& name){
+        if(!name.empty()&&seen.insert(name).second)
+            addFile(path/L"images"/fs::path(qstr(name).toStdWString()),assetLimit);
+    };
+    for(size_t i=0;i<manifest.images.size();++i){
+        addImage(manifest.images[i]);addImage(manifest.masks[i]);
+        for(const auto& frame:manifest.animationImages[i])addImage(frame);
+        if(const auto& gif=manifest.macGifs[i]){
+            addImage(gif->source);
+            std::vector<std::string> ordered;
+            for(const auto& [index,file]:gif->pixels)ordered.push_back(file);
+            std::sort(ordered.begin(),ordered.end());
+            for(const auto& file:ordered)addImage(file);
+        }
+    }
+    if(json.contains("cmykProfile"))addFile(path/L"cmyk.icc",imaging::maxCmykProfileBytes);
+    return result.result().toHex().toStdString();
+}
+}
+
+ObservedProject ProjectStore::openObserved(const fs::path& path){
+    const auto normalized=normalize(path);
+    Lock lock(normalized);recoverLocked(normalized);
+    return observe(normalized,{});
+}
+
+ObservedProject ProjectStore::observe(const fs::path& path,const std::string& known) const{
+    const auto normalized=normalize(path);
+    const auto journal=suffix(normalized,L".compositor-save.json");
+    if(existsPath(journal))fail("Project replacement is in progress");
+    auto fingerprint=packageFingerprint(normalized);
+    if(fingerprint==known)return {std::move(fingerprint),std::nullopt};
+    auto project=loadPackage(normalized);
+    if(existsPath(journal)||packageFingerprint(normalized)!=fingerprint)fail("Project changed while reading");
+    return {std::move(fingerprint),std::move(project)};
+}
+
+void ProjectStore::save(const fs::path& path,const Document& document,const std::string& active){
+    savePackage(path,document,active,false);
+}
+
+std::string ProjectStore::saveObserved(const fs::path& path,const Document& document,const std::string& active){
+    return savePackage(path,document,active,true);
+}
+
+void ProjectStore::saveMacCompatible(const fs::path& path,const Document& document,const std::string& active){
+    if(document.cmykProfile)fail("The Mac project format cannot retain this project's CMYK profile");
+    savePackage(path,document,active,false,true);
+}
+
+std::string ProjectStore::savePackage(const fs::path&path,const Document&document,const std::string&active,bool fingerprint,bool macCompatible){auto p=normalize(path);Lock lock(p);recoverLocked(p);auto manifest=encodeManifest(document,active,macCompatible);Journal j;j.tx=newId();j.phase="prepared";j.original=existsPath(p);if(j.original)safeTree(p);j.stage=suffix(p,L".stage-"+qstr(j.tx).toStdWString());j.backup=suffix(p,L".backup-"+qstr(j.tx).toStdWString());if(existsPath(j.stage)||existsPath(j.backup))fail("Save transaction name collision");
+    std::string savedFingerprint;
     auto inject=[&](SaveFaultPoint point){if(fault_)fault_(point);};
     try{createDir(j.stage);createDir(j.stage/L"images");QFile mark(qs(qtPath(marker(j.stage))));if(!mark.open(QIODevice::WriteOnly|QIODevice::NewOnly)||mark.write(QByteArray::fromStdString(j.tx))!=qsizetype(j.tx.size())||!mark.flush())fail("Cannot write save transaction marker");mark.close();uint64_t images=0,masks=0;
         for(auto&l:document.layers){if(l.raster){dimension(l.raster->width,l.raster->height,images);auto asset=j.stage/L"images"/fs::path(qstr(l.id+(l.deep&&l.deep->isHdr()?".exr":".png")).toStdWString());if(l.deep){if(!codec_.writeDeep||!l.deep->valid())fail("Invalid 16-bit layer pixels");codec_.writeDeep(asset,*l.deep);}else codec_.writeColor(asset,*l.raster);if(!isFile(asset)||fileBytes(asset)>assetLimit)fail("Encoded image missing or too large");}if(l.mask){auto&r=*l.mask->raster;dimension(r.width,r.height,masks);if(r.pixels.size()!=size_t(r.width)*r.height)fail("Invalid mask pixels");auto asset=j.stage/L"images"/fs::path(qstr(l.id+".mask.png").toStdWString());codec_.writeGray(asset,r);if(!isFile(asset)||fileBytes(asset)>assetLimit)fail("Encoded mask missing or too large");}}
-        for(const auto& l:document.layers){if(!l.animation)continue;for(size_t i=0;i<l.animation->frames.size();++i){if(i==l.animation->selectedFrame)continue;const auto& frame=l.animation->frames[i];if(!frame.raster)fail("Missing animation frame");dimension(frame.raster->width,frame.raster->height,images);auto asset=j.stage/L"images"/fs::path(qstr(l.id+".frame-"+std::to_string(i)+".png").toStdWString());codec_.writeColor(asset,*frame.raster);if(!isFile(asset)||fileBytes(asset)>assetLimit)fail("Encoded animation frame missing or too large");}}
+        for(const auto& l:document.layers){if(!l.animation)continue;
+            imaging::GifAnimation backing;
+            for(size_t i=0;i<l.animation->frames.size();++i){if(!macCompatible&&i==l.animation->selectedFrame)continue;const auto& frame=l.animation->frames[i];if(!frame.raster)fail("Missing animation frame");dimension(frame.raster->width,frame.raster->height,images);auto asset=j.stage/L"images"/fs::path(qstr(l.id+".frame-"+std::to_string(i)+".png").toStdWString());codec_.writeColor(asset,*frame.raster);if(!isFile(asset)||fileBytes(asset)>assetLimit)fail("Encoded animation frame missing or too large");
+                if(macCompatible){
+                    const auto& r=*frame.raster;
+                    backing.frames.push_back({{unsigned(r.width),unsigned(r.height),std::size_t(r.width)*4,r.rgba()},
+                        unsigned(std::max(2,int(std::lround(frame.delayMs/10.))))});
+                }
+            }
+            if(macCompatible){
+                // The GIF supplies an immutable timeline. PNG overrides retain exact edited color and alpha.
+                const auto file=j.stage/L"images"/fs::path(qstr(l.id+".gif").toStdWString());
+                imaging::encodeGif(file,backing);
+                if(!isFile(file)||fileBytes(file)>assetLimit)fail("Mac GIF backing file is too large");
+            }
+        }
         if(document.cmykProfile){const auto& profile=*document.cmykProfile;auto checked=imaging::makeCmykProfile(profile.bytes,profile.name);if(checked->sha256!=profile.sha256)fail("CMYK profile checksum mismatch");auto profilePath=qtPath(j.stage/L"cmyk.icc");if(profilePath.native().size()<260){QSaveFile file(qs(profilePath));file.setDirectWriteFallback(false);if(!file.open(QIODevice::WriteOnly)||file.write(reinterpret_cast<const char*>(profile.bytes.data()),qint64(profile.bytes.size()))!=qint64(profile.bytes.size())||!file.commit())fail("Cannot save CMYK profile");}else{QFile file(qs(profilePath));if(!file.open(QIODevice::WriteOnly|QIODevice::Truncate)||file.write(reinterpret_cast<const char*>(profile.bytes.data()),qint64(profile.bytes.size()))!=qint64(profile.bytes.size())||!file.flush())fail("Cannot save CMYK profile");}}
-        writeJson(j.stage/L"manifest.json",manifest);loadPackage(j.stage);inject(SaveFaultPoint::AfterStage);writeJournal(p,j,fault_);inject(SaveFaultPoint::AfterJournal);
+        writeJson(j.stage/L"manifest.json",manifest);loadPackage(j.stage);
+        if(fingerprint)savedFingerprint=packageFingerprint(j.stage);
+        inject(SaveFaultPoint::AfterStage);writeJournal(p,j,fault_);inject(SaveFaultPoint::AfterJournal);
         if(j.original)renamePath(p,j.backup);j.phase="backed_up";writeJournal(p,j,fault_);inject(SaveFaultPoint::AfterBackup);
         renamePath(j.stage,p);j.phase="installed";writeJournal(p,j,fault_);inject(SaveFaultPoint::AfterInstall);inject(SaveFaultPoint::BeforeCleanup);
     }catch(...){auto error=std::current_exception();try{if(existsPath(j.backup)){if(existsPath(p)){if(!owns(p,j.tx))fail("Cannot roll back unrelated package");removeTree(p);}renamePath(j.backup,p);}else if(!j.original&&existsPath(p)&&owns(p,j.tx))removeTree(p);removeTree(j.stage);if(existsPath(suffix(p,L".compositor-save.json")))removePath(suffix(p,L".compositor-save.json"));}catch(const std::exception& rollback){std::string original="unknown save failure";try{std::rethrow_exception(error);}catch(const std::exception& caught){original=caught.what();}catch(...){}throw std::runtime_error("Save failed and rollback needs recovery; all remaining transaction paths are preserved. Save error: "+original+". Rollback error: "+rollback.what());}catch(...){throw std::runtime_error("Save failed and rollback needs recovery; all remaining transaction paths are preserved");}std::rethrow_exception(error);}
     // Installation is committed. Cleanup failure leaves a recoverable journal and a valid new package.
-    try{removeTree(j.backup);finishJournal(p,j.tx);}catch(...){return;}
+    try{removeTree(j.backup);finishJournal(p,j.tx);}catch(...){/* Committed. The next store operation can finish cleanup. */}
+    return savedFingerprint;
 }
 }

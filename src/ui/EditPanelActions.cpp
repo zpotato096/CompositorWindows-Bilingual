@@ -71,7 +71,7 @@ ui::EditPanelHost MainWindow::makeEditPanelHost(EditorProject& project,const Doc
         if(target==owner->document->layers.end()||
             (!state->live&&(target->raster!=state->original.raster||target->deep!=state->original.deep||
             (editPanel_&&editPanel_->kind()!=ui::EditPanelSession::Kind::Hue&&target->transform!=state->original.transform)))){
-            if(inserting)throw std::runtime_error("The source layer changed before Split to Layers finished");
+            if(inserting)throw std::runtime_error("The source layer changed before the new layers were ready");
             return;
         }
         Document prepared=*owner->document;
@@ -97,9 +97,15 @@ ui::EditPanelHost MainWindow::makeEditPanelHost(EditorProject& project,const Doc
         const auto previousMinimum=owner->history.minimumEntries;
         // The four new planes can exceed the soft history budget after Undo.
         if(channelBytes>owner->history.byteLimit)owner->history.minimumEntries=std::max(previousMinimum,std::size_t{1});
-        try{if(!state->live)owner->history.begin(inserting?"Split to Layers":action,owner->document,owner->active);}
+        const bool selectInserted=inserting&&!value.insertionAction.empty();
+        const auto& operation=selectInserted?value.insertionAction:action;
+        try{if(!state->live)owner->history.begin(inserting&&!selectInserted?"Split to Layers":operation,owner->document,owner->active);}
         catch(...){owner->history.minimumEntries=previousMinimum;throw;}
-        try{owner->document=std::move(prepared);owner->history.end(owner->document,owner->active);state->livePending=false;if(value.maskSelected)owner->maskSelected=true;}
+        try{
+            owner->document=std::move(prepared);
+            if(selectInserted){owner->active=value.active;owner->selected={value.active};owner->maskSelected=false;}
+            owner->history.end(owner->document,owner->active);state->livePending=false;if(value.maskSelected)owner->maskSelected=true;
+        }
         catch(...){owner->history.minimumEntries=previousMinimum;if(auto snapshot=owner->history.cancel()){owner->document=std::move(snapshot->document);owner->active=std::move(snapshot->activeLayer);}state->livePending=false;throw;}
     };
     host.closed=[this,owner,present,state]{

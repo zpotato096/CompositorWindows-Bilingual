@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "MainWindow.h"
 #include "PropertyControls.h"
 #include "editing/DocumentGeometry.h"
@@ -150,18 +151,18 @@ void MainWindow::updateTransform(Point point,Qt::KeyboardModifiers modifiers,boo
 }
 void MainWindow::setupTransformActions(){
     auto*bar=addToolBar("Transform Options");bar->setObjectName("transformOptions");
-    auto*autoSelect=new QCheckBox("Auto-select layer");autoSelect->setObjectName("transformAutoSelect");autoSelect->setChecked(true);bar->addWidget(autoSelect);connect(autoSelect,&QCheckBox::toggled,this,[this](bool value){autoSelectLayers_=value;});
-    auto*controls=new QCheckBox("Show controls");controls->setObjectName("transformShowControls");controls->setChecked(true);bar->addWidget(controls);connect(controls,&QCheckBox::toggled,this,[this](bool value){transformControls_=value;refresh(false,false);});
-    auto*ratio=new QCheckBox("Lock aspect ratio");ratio->setObjectName("transformLockRatio");bar->addWidget(ratio);connect(ratio,&QCheckBox::toggled,this,[this](bool v){lockRatio_=v;});
-    auto*snap=new QCheckBox("Snap to edges and centers");snap->setObjectName("transformSnapping");snap->setChecked(true);bar->addWidget(snap);connect(snap,&QCheckBox::toggled,this,[this](bool v){auto policy=snapPolicy_;policy.enabled=v;setSnapPolicy(policy);});
-    auto*scale=new ui::PropertyNumber;scale->releaseFocus=[this]{if(canvas())canvas()->setFocus();};scale->setObjectName("transformScale");scale->setAccessibleName("Transform scale percent");scale->setRange(.01,100000);scale->setDecimals(2);scale->setSuffix(" %");scale->setValue(100);bar->addWidget(scale);connect(scale,&QDoubleSpinBox::valueChanged,this,[this](double value){changeTransformDraft([&](Transform& draft){draft=editing_transform::scaledPercent(draft,value,transformScalePixelSize());});});
-    auto*sampling=new QComboBox;sampling->setObjectName("transformSampling");sampling->addItems({"Nearest","Smooth","High quality"});sampling->setCurrentIndex(2);sampling->setAccessibleName("Transform sampling");bar->addWidget(sampling);connect(sampling,&QComboBox::currentIndexChanged,this,[this](int i){if(i>=0&&i<=2)changeTransformDraft([&](Transform& draft){draft.sampling=Transform::Sampling(i);});});
+    auto*autoSelect=new QCheckBox(compositor::ui::localized("Auto-select layer"));autoSelect->setObjectName("transformAutoSelect");autoSelect->setChecked(true);bar->addWidget(autoSelect);connect(autoSelect,&QCheckBox::toggled,this,[this](bool value){autoSelectLayers_=value;});
+    auto*controls=new QCheckBox(compositor::ui::localized("Show controls"));controls->setObjectName("transformShowControls");controls->setChecked(true);bar->addWidget(controls);connect(controls,&QCheckBox::toggled,this,[this](bool value){transformControls_=value;refresh(false,false);});
+    auto*ratio=new QCheckBox(compositor::ui::localized("Lock aspect ratio"));ratio->setObjectName("transformLockRatio");bar->addWidget(ratio);connect(ratio,&QCheckBox::toggled,this,[this](bool v){lockRatio_=v;});
+    auto*snap=new QCheckBox(compositor::ui::localized("Snap to edges and centers"));snap->setObjectName("transformSnapping");snap->setChecked(true);bar->addWidget(snap);connect(snap,&QCheckBox::toggled,this,[this](bool v){auto policy=snapPolicy_;policy.enabled=v;setSnapPolicy(policy);});
+    auto*scale=new ui::PropertyNumber;scale->releaseFocus=[this]{if(canvas())canvas()->setFocus();};scale->setObjectName("transformScale");scale->setAccessibleName(compositor::ui::localized("Transform scale percent"));scale->setRange(.01,100000);scale->setDecimals(2);scale->setSuffix(" %");scale->setValue(100);bar->addWidget(scale);connect(scale,&QDoubleSpinBox::valueChanged,this,[this](double value){changeTransformDraft([&](Transform& draft){draft=editing_transform::scaledPercent(draft,value,transformScalePixelSize());});});
+    auto*sampling=new QComboBox;sampling->setObjectName("transformSampling");sampling->addItems({"Nearest","Smooth","High quality"});sampling->setCurrentIndex(2);sampling->setAccessibleName(compositor::ui::localized("Transform sampling"));bar->addWidget(sampling);connect(sampling,&QComboBox::currentIndexChanged,this,[this](int i){if(i>=0&&i<=2)changeTransformDraft([&](Transform& draft){draft.sampling=Transform::Sampling(i);});});
     for(bool horizontal:{true,false}){auto*flip=bar->addAction(horizontal?"Flip H":"Flip V");flip->setObjectName(horizontal?"transformFlipH":"transformFlipV");bindCommand(flip,"Transform Options",horizontal?"Flip H":"Flip V",[this,horizontal]{changeTransformDraft([&](Transform& draft){draft=editing_transform::flippedLocal(draft,horizontal);});});}
-    auto*menu=menuBar()->addMenu("&Transform");
-    auto*free=menu->addAction("Free Transform");free->setObjectName("freeTransform");free->setShortcut(QKeySequence("Ctrl+T"));bindCommand(free,"Transform","Free Transform",[this]{startTransformSession(true);});
-    auto*distort=menu->addAction("Distort");distort->setObjectName("distortTransform");bindCommand(distort,"Transform","Distort",[this]{startTransformSession(true,true);});
-    auto*apply=menu->addAction("Apply Transform");apply->setObjectName("applyTransform");bar->addAction(apply);bindCommand(apply,"Transform","Apply Transform",[this]{applyTransformSession();});
-    auto*cancel=menu->addAction("Cancel Transform");cancel->setObjectName("cancelTransform");bar->addAction(cancel);bindCommand(cancel,"Transform","Cancel Transform",[this]{cancelTransformSession();});
+    auto*menu=compositor::ui::localizedMenu(menuBar(), "&Transform");
+    auto*free=menu->addAction(compositor::ui::localized("Free Transform"));free->setObjectName("freeTransform");free->setShortcut(QKeySequence("Ctrl+T"));bindCommand(free,"Transform","Free Transform",[this]{startTransformSession(true);});
+    auto*distort=menu->addAction(compositor::ui::localized("Distort"));distort->setObjectName("distortTransform");bindCommand(distort,"Transform","Distort",[this]{startTransformSession(true,true);});
+    auto*apply=menu->addAction(compositor::ui::localized("Apply Transform"));apply->setObjectName("applyTransform");bar->addAction(apply);bindCommand(apply,"Transform","Apply Transform",[this]{applyTransformSession();});
+    auto*cancel=menu->addAction(compositor::ui::localized("Cancel Transform"));cancel->setObjectName("cancelTransform");bar->addAction(cancel);bindCommand(cancel,"Transform","Cancel Transform",[this]{cancelTransformSession();});
     updateTransformActions();
     action(menu,"Flip Layer Horizontally",{},[this]{if(current()&&current()->document)edit("Flip Horizontal",[&](Document&d){d=editing::flipLayers(d,layerSelection().ids,true);});});
     action(menu,"Flip Layer Vertically",{},[this]{if(current()&&current()->document)edit("Flip Vertical",[&](Document&d){d=editing::flipLayers(d,layerSelection().ids,false);});});

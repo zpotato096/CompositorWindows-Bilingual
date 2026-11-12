@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "AdjustmentAdvancedControls.h"
 #include <QAccessibleWidget>
 #include <QHBoxLayout>
@@ -95,8 +96,8 @@ public:
     std::function<void(LevelRange)> changed;
     explicit LevelsGraph(QWidget* parent):QWidget(parent){
         installLevelsHandleAccessibility();
-        setObjectName("levelsHistogramGraph");setAccessibleName("Original RGB histogram and Levels handles");setMinimumSize(240,210);setMouseTracking(true);
-        setToolTip("Linear histogram with automatic vertical scaling. Tall spikes may extend beyond the graph; all tones from 0 to 255 remain included.");
+        setObjectName("levelsHistogramGraph");setAccessibleName(compositor::ui::localized("Original RGB histogram and Levels handles"));setMinimumSize(240,210);setMouseTracking(true);
+        setToolTip(compositor::ui::localized("Linear histogram with automatic vertical scaling. Tall spikes may extend beyond the graph; all tones from 0 to 255 remain included."));
         setAccessibleDescription(toolTip());
         const char* names[]{"Input black","Gamma","Input white","Output black","Output white"};
         for(size_t i=0;i<handles_.size();++i){
@@ -149,9 +150,9 @@ struct LevelsAdvancedControls::Impl {
     QLabel* caption{};
     explicit Impl(LevelsAdvancedControls* parent):owner(parent){
         auto* layout=new QVBoxLayout(parent);layout->setContentsMargins(0,0,0,0);graph=new LevelsGraph(parent);layout->addWidget(graph);graph->changed=[this](LevelRange range){auto changed=settings;changed.ranges[size_t(changed.channel)]=range;publish(changed);};
-        auto* sampling=new QHBoxLayout;sampling->addWidget(new QLabel("Sample original",parent));const char* names[]{"Black","Gray","White"};for(int i=0;i<3;++i){samples[size_t(i)]=new QPushButton(names[i],parent);auto* button=samples[size_t(i)];button->setObjectName(QString("levelsSample%1").arg(names[i]));button->setCheckable(true);sampling->addWidget(button);QObject::connect(button,&QPushButton::clicked,parent,[this,i]{arm(armed==LevelsSample(i)?std::nullopt:std::optional(LevelsSample(i)));});}layout->addLayout(sampling);
+        auto* sampling=new QHBoxLayout;sampling->addWidget(new QLabel(compositor::ui::localized("Sample original"),parent));const char* names[]{"Black","Gray","White"};for(int i=0;i<3;++i){samples[size_t(i)]=new QPushButton(names[i],parent);auto* button=samples[size_t(i)];button->setObjectName(QString("levelsSample%1").arg(names[i]));button->setCheckable(true);sampling->addWidget(button);QObject::connect(button,&QPushButton::clicked,parent,[this,i]{arm(armed==LevelsSample(i)?std::nullopt:std::optional(LevelsSample(i)));});}layout->addLayout(sampling);
         auto* automatic=new QHBoxLayout;const char* labels[]{"Contrast","Color","Color + neutral midtones"};const char* ids[]{"Contrast","Color","Neutral"};for(int i=0;i<3;++i){autos[size_t(i)]=new QPushButton(labels[i],parent);auto* button=autos[size_t(i)];button->setObjectName(QString("levelsAuto%1").arg(ids[i]));button->setEnabled(false);automatic->addWidget(button);QObject::connect(button,&QPushButton::clicked,parent,[this,i]{arm({});publish(autoLevels(graph->bins,LevelsAuto(i)));});}layout->addLayout(automatic);
-        caption=new QLabel("Original image",parent);caption->setToolTip("Histogram weighted by opacity and selection");caption->setStyleSheet("color: #989ba3; font-size: 11px;");caption->setWordWrap(true);layout->addWidget(caption);
+        caption=new QLabel(compositor::ui::localized("Original image"),parent);caption->setToolTip(compositor::ui::localized("Histogram weighted by opacity and selection"));caption->setStyleSheet("color: #989ba3; font-size: 11px;");caption->setWordWrap(true);layout->addWidget(caption);
     }
     void arm(std::optional<LevelsSample> mode){armed=mode;for(int i=0;i<3;++i)samples[size_t(i)]->setChecked(mode==LevelsSample(i));if(owner->onSampleModeChanged)owner->onSampleModeChanged(mode);}
     void publish(const LevelsSettings& next){if(json.empty()||next==settings)return;settings=next;json=withLevelsSettings(json,settings);graph->settings=settings;graph->syncHandles();graph->update();if(owner->onChanged)owner->onChanged(json);}
@@ -170,7 +171,7 @@ class HueSpectrum final:public QWidget {
 public:
     HueSettings settings;
     std::function<void(HueBand)> changed;
-    explicit HueSpectrum(QWidget* parent):QWidget(parent){setObjectName("hueSpectrumGraph");setAccessibleName("Hue range before and after spectrum with four band handles");setMinimumSize(240,70);}
+    explicit HueSpectrum(QWidget* parent):QWidget(parent){setObjectName("hueSpectrumGraph");setAccessibleName(compositor::ui::localized("Hue range before and after spectrum with four band handles"));setMinimumSize(240,70);}
 private:
     std::optional<int> dragging_;
     void paintEvent(QPaintEvent*)override{
@@ -188,7 +189,7 @@ public:
     std::optional<size_t> selected,dragging;
     std::function<void(const CurvesSettings&)> changed;
     std::function<void()> selectionChanged;
-    explicit CurveGraph(QWidget* parent):QWidget(parent){setObjectName("curvesGraph");setAccessibleName("Curves input and output graph");setMinimumSize(240,260);}
+    explicit CurveGraph(QWidget* parent):QWidget(parent){setObjectName("curvesGraph");setAccessibleName(compositor::ui::localized("Curves input and output graph"));setMinimumSize(240,260);}
 private:
     QRectF graphRect()const{return QRectF(8,8,width()-16,height()-16);}
     QPointF position(Point point)const{auto box=graphRect();return {box.x()+point.x/255*box.width(),box.y()+(1-point.y/255)*box.height()};}
@@ -213,7 +214,7 @@ struct HueAdvancedControls::Impl {
     std::optional<HueSample> armed;
     std::optional<HueTargetDrag> drag;
     bool targeting{};
-    explicit Impl(HueAdvancedControls* parent):owner(parent){auto* layout=new QVBoxLayout(parent);layout->setContentsMargins(0,0,0,0);spectrum=new HueSpectrum(parent);layout->addWidget(spectrum);angles=new QLabel(parent);angles->setAccessibleName("Hue band handle angles");layout->addWidget(angles);spectrum->changed=[this](HueBand band){auto next=settings;next.bands[size_t(next.range)]=band;publish(next);};auto* buttons=new QHBoxLayout;const char* labels[]{"Sample color","Add color","Remove color"};const char* ids[]{"Sample","Add","Remove"};for(int i=0;i<3;++i){auto* button=new QPushButton(labels[i],parent);samples[size_t(i)]=button;button->setObjectName(QString("hue%1Color").arg(ids[i]));button->setCheckable(true);buttons->addWidget(button);QObject::connect(button,&QPushButton::clicked,parent,[this,i]{setTargeting(false);arm(armed==HueSample(i)?std::nullopt:std::optional(HueSample(i)));});}target=new QPushButton("Targeted adjustment",parent);target->setObjectName("hueTargetedAdjustment");target->setCheckable(true);buttons->addWidget(target);QObject::connect(target,&QPushButton::clicked,parent,[this]{arm({});setTargeting(!targeting);});layout->addLayout(buttons);sync();}
+    explicit Impl(HueAdvancedControls* parent):owner(parent){auto* layout=new QVBoxLayout(parent);layout->setContentsMargins(0,0,0,0);spectrum=new HueSpectrum(parent);layout->addWidget(spectrum);angles=new QLabel(parent);angles->setAccessibleName(compositor::ui::localized("Hue band handle angles"));layout->addWidget(angles);spectrum->changed=[this](HueBand band){auto next=settings;next.bands[size_t(next.range)]=band;publish(next);};auto* buttons=new QHBoxLayout;const char* labels[]{"Sample color","Add color","Remove color"};const char* ids[]{"Sample","Add","Remove"};for(int i=0;i<3;++i){auto* button=new QPushButton(labels[i],parent);samples[size_t(i)]=button;button->setObjectName(QString("hue%1Color").arg(ids[i]));button->setCheckable(true);buttons->addWidget(button);QObject::connect(button,&QPushButton::clicked,parent,[this,i]{setTargeting(false);arm(armed==HueSample(i)?std::nullopt:std::optional(HueSample(i)));});}target=new QPushButton(compositor::ui::localized("Targeted adjustment"),parent);target->setObjectName("hueTargetedAdjustment");target->setCheckable(true);buttons->addWidget(target);QObject::connect(target,&QPushButton::clicked,parent,[this]{arm({});setTargeting(!targeting);});layout->addLayout(buttons);sync();}
     void arm(std::optional<HueSample> mode){armed=mode;for(int i=0;i<3;++i)samples[size_t(i)]->setChecked(armed==HueSample(i));if(owner->onSampleModeChanged)owner->onSampleModeChanged(mode);}
     void setTargeting(bool value){bool was=targeting;targeting=value;target->setChecked(value);if(!value)drag.reset();if(was!=value&&owner->onTargetingChanged)owner->onTargetingChanged(value);}
     void sync(){spectrum->settings=settings;spectrum->update();bool band=settings.range!=ColorRange::Master&&!settings.colorize;spectrum->setVisible(band);angles->setVisible(band);for(auto* button:samples)button->setVisible(band);target->setVisible(!settings.colorize);auto h=settings.bands[size_t(settings.range)].handles();angles->setText(QString("%1\u00b0    %2\u00b0    %3\u00b0    %4\u00b0").arg(std::round(h[0])).arg(std::round(h[1])).arg(std::round(h[2])).arg(std::round(h[3])));}
@@ -236,7 +237,7 @@ struct CurvesAdvancedControls::Impl {
     CurveGraph* graph{};
     QLabel* coordinates{};
     QPushButton* remove{};
-    explicit Impl(CurvesAdvancedControls* parent):owner(parent){auto* layout=new QVBoxLayout(parent);layout->setContentsMargins(0,0,0,0);graph=new CurveGraph(parent);layout->addWidget(graph);graph->changed=[this](const CurvesSettings& next){publish(next);};graph->selectionChanged=[this]{sync();};layout->addWidget(new QLabel("Click to add a point. Drag to adjust.",parent));auto* row=new QHBoxLayout;coordinates=new QLabel(parent);row->addWidget(coordinates);row->addStretch();remove=new QPushButton("Remove point",parent);remove->setObjectName("curvesRemovePoint");row->addWidget(remove);layout->addLayout(row);QObject::connect(remove,&QPushButton::clicked,parent,[this]{if(!graph->selected)return;auto next=settings;if(removeCurvePoint(next,*graph->selected)){graph->selected.reset();publish(next);}});auto* reset=new QPushButton("Reset curve",parent);reset->setObjectName("curvesResetCurve");layout->addWidget(reset);QObject::connect(reset,&QPushButton::clicked,parent,[this]{auto next=settings;resetCurve(next);graph->selected.reset();publish(next);sync();});sync();}
+    explicit Impl(CurvesAdvancedControls* parent):owner(parent){auto* layout=new QVBoxLayout(parent);layout->setContentsMargins(0,0,0,0);graph=new CurveGraph(parent);layout->addWidget(graph);graph->changed=[this](const CurvesSettings& next){publish(next);};graph->selectionChanged=[this]{sync();};layout->addWidget(new QLabel(compositor::ui::localized("Click to add a point. Drag to adjust."),parent));auto* row=new QHBoxLayout;coordinates=new QLabel(parent);row->addWidget(coordinates);row->addStretch();remove=new QPushButton(compositor::ui::localized("Remove point"),parent);remove->setObjectName("curvesRemovePoint");row->addWidget(remove);layout->addLayout(row);QObject::connect(remove,&QPushButton::clicked,parent,[this]{if(!graph->selected)return;auto next=settings;if(removeCurvePoint(next,*graph->selected)){graph->selected.reset();publish(next);}});auto* reset=new QPushButton(compositor::ui::localized("Reset curve"),parent);reset->setObjectName("curvesResetCurve");layout->addWidget(reset);QObject::connect(reset,&QPushButton::clicked,parent,[this]{auto next=settings;resetCurve(next);graph->selected.reset();publish(next);sync();});sync();}
     void sync(){graph->settings=settings;const auto& points=settings.channels[size_t(settings.channel)];if(graph->selected&&*graph->selected>=points.size())graph->selected.reset();if(graph->selected){auto point=points[*graph->selected];coordinates->setText(QString("Input %1  |  Output %2").arg(int(point.x)).arg(int(point.y)));}else coordinates->clear();remove->setEnabled(graph->selected&&*graph->selected>0&&*graph->selected+1<points.size());graph->update();}
     void publish(const CurvesSettings& next){if(json.empty()||next==settings)return;settings=next;json=withCurvesSettings(json,settings);sync();if(owner->onChanged)owner->onChanged(json);}
 };

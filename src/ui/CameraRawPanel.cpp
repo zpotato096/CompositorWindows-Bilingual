@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "CameraRawPanel.h"
 #include "PropertyControls.h"
 #include <QApplication>
@@ -45,8 +46,8 @@ public:
 protected:
     void contextMenuEvent(QContextMenuEvent* event) override {
         QMenu menu;
-        auto* histogram = menu.addAction("Histogram");
-        auto* vectors = menu.addAction("Vectorscope");
+        auto* histogram = menu.addAction(compositor::ui::localized("Histogram"));
+        auto* vectors = menu.addAction(compositor::ui::localized("Vectorscope"));
         if (auto* chosen = menu.exec(event->globalPos())) {
             vectorscope = chosen == vectors;
             Q_UNUSED(histogram);
@@ -624,8 +625,8 @@ void CameraRawPanel::build() {
     shadows->setCheckable(true);
     highlights->setText("▲");
     shadows->setText("▼");
-    highlights->setAccessibleName("Highlight clipping");
-    shadows->setAccessibleName("Shadow clipping");
+    highlights->setAccessibleName(compositor::ui::localized("Highlight clipping"));
+    shadows->setAccessibleName(compositor::ui::localized("Shadow clipping"));
     clips->addWidget(highlights);
     clips->addStretch(1);
     clips->addWidget(shadows);
@@ -653,8 +654,8 @@ void CameraRawPanel::build() {
         auto* line = stacked ? static_cast<QBoxLayout*>(new QVBoxLayout(row)) : static_cast<QBoxLayout*>(new QHBoxLayout(row));
         line->setContentsMargins(0, stacked ? 2 : 1, 0, stacked ? 2 : 1);
         line->setSpacing(stacked ? 4 : 8);
-        auto* label = new ResetLabel(stacked ? name.section(QLatin1Char(' '), -1) : name);
-        label->setToolTip(name);
+        auto* label = new ResetLabel(stacked ? ui::localized(name.section(QLatin1Char(' '), -1)) : ui::localized(name));
+        label->setToolTip(ui::localized(name));
         if (stacked) label->setAlignment(Qt::AlignCenter);
         else label->setObjectName("sliderLabel");
         auto* slider = new CameraRawSlider(Qt::Horizontal);
@@ -663,14 +664,14 @@ void CameraRawPanel::build() {
         spin->setDecimals(decimals);
         spin->setSingleStep(std::pow(10, -std::min(decimals, 1)));
         if (field) spin->setValue(*field);
-        spin->setAccessibleName(name);
+        spin->setAccessibleName(ui::localized(name));
         spin->setButtonSymbols(QAbstractSpinBox::NoButtons);
         spin->setAlignment(Qt::AlignCenter);
         spin->setFixedWidth(72);
         slider->setRange(0, 10000);
         slider->setSingleStep(1);
         slider->setPageStep(100);
-        slider->setAccessibleName(name + " slider");
+        slider->setAccessibleName(ui::localized("%1 slider").arg(ui::localized(name)));
         applyTrackColors(slider, gradient);
         const auto position = [low, high](double value) { return int(std::lround((value - low) / (high - low) * 10000)); };
         slider->setValue(position(field ? *field : fallback));
@@ -706,11 +707,11 @@ void CameraRawPanel::build() {
         auto* disclosure = new SectionChevron;
         disclosure->setObjectName("section." + title);
         disclosure->setChecked(expanded);
-        disclosure->setAccessibleName(title);
-        auto* label = new QLabel(title);
+        disclosure->setAccessibleName(ui::localized(title));
+        auto* label = new QLabel(ui::localized(title));
         auto* eye = new SectionEye;
         eye->setObjectName("eye." + id);
-        eye->setAccessibleName("Show " + title);
+        eye->setAccessibleName(ui::localized("Show %1").arg(ui::localized(title)));
         eye->setChecked(*shown);
         row->addWidget(disclosure);
         row->addWidget(label, 1);
@@ -728,9 +729,9 @@ void CameraRawPanel::build() {
     };
     auto toolButton = [this](const QString& name, Tool tool) {
         auto* button = new QToolButton;
-        button->setText(name);
+        button->setText(ui::localized(name));
         button->setCheckable(true);
-        button->setAccessibleName(name);
+        button->setAccessibleName(ui::localized(name));
         button->setAutoRaise(true);
         connect(button, &QToolButton::clicked, this, [this, tool] { arm(tool); });
         tools_[size_t(tool) - 1] = button;
@@ -748,8 +749,8 @@ void CameraRawPanel::build() {
     auto* color = addSection(sections, "Color", "color", true, &eyes_.color, [this] { return settings_.adjustsColor(); });
     whiteBalance_ = new QComboBox;
     whiteBalance_->setObjectName("cameraRawWhiteBalance");
-    whiteBalance_->addItems({"Custom", "Auto"});
-    whiteBalance_->setAccessibleName("White Balance");
+    whiteBalance_->addItems(compositor::ui::localizedList({"Custom", "Auto"}));
+    whiteBalance_->setAccessibleName(compositor::ui::localized("White Balance"));
     color->addWidget(whiteBalance_);
     color->addWidget(toolButton("White Balance", Tool::WhiteBalance));
     connect(whiteBalance_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int index) {
@@ -768,8 +769,8 @@ void CameraRawPanel::build() {
     auto* curvePages = new QWidget;
     auto* curvePageLayout = new QHBoxLayout(curvePages);
     curvePageLayout->setContentsMargins(0, 0, 0, 0);
-    auto* parametric = new QPushButton("Parametric");
-    auto* point = new QPushButton("Point");
+    auto* parametric = new QPushButton(compositor::ui::localized("Parametric"));
+    auto* point = new QPushButton(compositor::ui::localized("Point"));
     parametric->setCheckable(true);
     point->setCheckable(true);
     parametric->setChecked(true);
@@ -782,8 +783,8 @@ void CameraRawPanel::build() {
     curve->addWidget(curvePages);
     auto* channel = new QComboBox;
     channel->setObjectName("cameraRawCurveChannel");
-    channel->addItems({"RGB", "Red", "Green", "Blue"});
-    channel->setAccessibleName("Curve Channel");
+    channel->addItems(compositor::ui::localizedList({"RGB", "Red", "Green", "Blue"}));
+    channel->setAccessibleName(compositor::ui::localized("Curve Channel"));
     curve->addWidget(channel);
     auto* graph = new CurveGraph;
     graph->setObjectName("cameraRawCurve");
@@ -799,8 +800,8 @@ void CameraRawPanel::build() {
     auto* refine = addSlider(curve, "Refine Saturation", &settings_.curve.refineSaturation, -100, 100, 0, 0, 0, {}, false);
     auto* presets = new QComboBox;
     presets->setObjectName("cameraRawCurvePreset");
-    presets->addItems({"Curve Preset", "Linear", "Medium Contrast", "Strong Contrast"});
-    presets->setAccessibleName("Curve Preset");
+    presets->addItems(compositor::ui::localizedList({"Curve Preset", "Linear", "Medium Contrast", "Strong Contrast"}));
+    presets->setAccessibleName(compositor::ui::localized("Curve Preset"));
     curve->addWidget(presets);
     connect(curveGroup, &QButtonGroup::idClicked, this, [this, channel, graph](int id) { curveParametric_ = id == 0; channel->setVisible(id == 1); graph->update(); });
     channel->setVisible(false);
@@ -817,8 +818,8 @@ void CameraRawPanel::build() {
     auto* mixer = addSection(sections, "Mixer", "mixer", true, &eyes_.mixer, [this] { return settings_.mixer.adjusts(); });
     auto* mixerPages = new QHBoxLayout;
     auto* hsl = new QPushButton("HSL");
-    auto* colors = new QPushButton("Color");
-    auto* points = new QPushButton("Point");
+    auto* colors = new QPushButton(compositor::ui::localized("Color"));
+    auto* points = new QPushButton(compositor::ui::localized("Point"));
     hsl->setCheckable(true);
     colors->setCheckable(true);
     points->setCheckable(true);
@@ -833,9 +834,9 @@ void CameraRawPanel::build() {
     mixerPages->addWidget(toolButton("Mixer Target", Tool::Mixer));
     mixer->addLayout(mixerPages);
     auto* mixerTabs = new QHBoxLayout;
-    auto* hueTab = new QPushButton("Hue");
-    auto* satTab = new QPushButton("Saturation");
-    auto* lumTab = new QPushButton("Luminance");
+    auto* hueTab = new QPushButton(compositor::ui::localized("Hue"));
+    auto* satTab = new QPushButton(compositor::ui::localized("Saturation"));
+    auto* lumTab = new QPushButton(compositor::ui::localized("Luminance"));
     for (auto* tab : {hueTab, satTab, lumTab}) tab->setCheckable(true);
     hueTab->setChecked(true);
     auto* tabGroup = new QButtonGroup(this);
@@ -886,14 +887,14 @@ void CameraRawPanel::build() {
     pointLayout->addWidget(toolButton("Point Color", Tool::PointColor));
     auto* pointList = new QComboBox;
     pointList->setObjectName("cameraRawPoints");
-    pointList->setAccessibleName("Point Color");
+    pointList->setAccessibleName(compositor::ui::localized("Point Color"));
     pointLayout->addWidget(pointList);
     auto* pointHue = addSlider(pointLayout, "Hue Shift", nullptr, -100, 100, 0, 0, 0, {}, false);
     auto* pointSat = addSlider(pointLayout, "Saturation Shift", nullptr, -100, 100, 0, 0, 0, {}, false);
     auto* pointLum = addSlider(pointLayout, "Luminance Shift", nullptr, -100, 100, 0, 0, 0, {}, false);
-    auto* visualize = new QCheckBox("Visualize");
+    auto* visualize = new QCheckBox(compositor::ui::localized("Visualize"));
     visualize->setObjectName("cameraRawVisualize");
-    visualize->setAccessibleName("Visualize");
+    visualize->setAccessibleName(compositor::ui::localized("Visualize"));
     pointLayout->addWidget(visualize);
     mixer->addWidget(pointHost);
     pointHost->hide();
@@ -976,8 +977,8 @@ void CameraRawPanel::build() {
     auto* grading = addSection(sections, "Color Grading", "grading", true, &eyes_.grading, [this] { return settings_.grading.adjusts(); });
     auto* gradePage = new QComboBox;
     gradePage->setObjectName("cameraRawGradePage");
-    gradePage->addItems({"Three-Way", "Shadows", "Midtones", "Highlights", "Global"});
-    gradePage->setAccessibleName("Color Grading");
+    gradePage->addItems(compositor::ui::localizedList({"Three-Way", "Shadows", "Midtones", "Highlights", "Global"}));
+    gradePage->setAccessibleName(compositor::ui::localized("Color Grading"));
     grading->addWidget(gradePage);
     filters::CameraRawGradeWheel* wheels[]{&settings_.grading.shadows, &settings_.grading.midtones, &settings_.grading.highlights, &settings_.grading.global};
     const char* wheelNames[]{"Shadows", "Midtones", "Highlights", "Global"};
@@ -1014,8 +1015,8 @@ void CameraRawPanel::build() {
     addSlider(effects, "Dehaze", &settings_.dehaze, -100, 100, 0, 0, 0, {}, false);
     auto* glowStyle = new QComboBox;
     glowStyle->setObjectName("cameraRawGlowStyle");
-    glowStyle->addItems({"Diffusion", "Bloom", "Halation"});
-    glowStyle->setAccessibleName("Glow Style");
+    glowStyle->addItems(compositor::ui::localizedList({"Diffusion", "Bloom", "Halation"}));
+    glowStyle->setAccessibleName(compositor::ui::localized("Glow Style"));
     effects->addWidget(glowStyle);
     addSlider(effects, "Glow", &settings_.glow, 0, 100, 0, 0, 0, {}, false);
     addSlider(effects, "Glow Range", &settings_.glowRange, -100, 100, 0, 0, 0, {}, false);
@@ -1023,8 +1024,8 @@ void CameraRawPanel::build() {
     addSlider(effects, "Glow Warmth", &settings_.glowWarmth, -100, 100, 0, 0, 0, {}, false);
     auto* vignetteStyle = new QComboBox;
     vignetteStyle->setObjectName("cameraRawVignetteStyle");
-    vignetteStyle->addItems({"Highlight Priority", "Color Priority", "Paint Overlay"});
-    vignetteStyle->setAccessibleName("Vignette Style");
+    vignetteStyle->addItems(compositor::ui::localizedList({"Highlight Priority", "Color Priority", "Paint Overlay"}));
+    vignetteStyle->setAccessibleName(compositor::ui::localized("Vignette Style"));
     effects->addWidget(vignetteStyle);
     addSlider(effects, "Vignette", &settings_.vignetteAmount, -100, 100, 0, 0, 0, {}, false);
     addSlider(effects, "Vignette Midpoint", &settings_.vignetteMidpoint, 0, 100, 50, 0, 0, {}, false);
@@ -1070,10 +1071,10 @@ void CameraRawPanel::build() {
     });
 
     auto* optics = addSection(sections, "Optics", "optics", false, &eyes_.optics, [this] { return settings_.optics.adjusts(); });
-    auto* aberration = new QCheckBox("Remove Chromatic Aberration");
-    auto* profile = new QCheckBox("Enable Lens Profile");
-    aberration->setAccessibleName("Remove Chromatic Aberration");
-    profile->setAccessibleName("Enable Lens Profile");
+    auto* aberration = new QCheckBox(compositor::ui::localized("Remove Chromatic Aberration"));
+    auto* profile = new QCheckBox(compositor::ui::localized("Enable Lens Profile"));
+    aberration->setAccessibleName(compositor::ui::localized("Remove Chromatic Aberration"));
+    profile->setAccessibleName(compositor::ui::localized("Enable Lens Profile"));
     optics->addWidget(aberration);
     optics->addWidget(profile);
     optics->addWidget(toolButton("Defringe", Tool::Defringe));
@@ -1101,17 +1102,17 @@ void CameraRawPanel::build() {
     auto* geometry = addSection(sections, "Geometry", "geometry", false, &eyes_.geometry, [this] { return settings_.geometry.adjusts(); });
     auto* upright = new QComboBox;
     upright->setObjectName("cameraRawUpright");
-    upright->addItems({"Off", "Guided"});
-    upright->setAccessibleName("Upright");
+    upright->addItems(compositor::ui::localizedList({"Off", "Guided"}));
+    upright->setAccessibleName(compositor::ui::localized("Upright"));
     auto* projection = new QComboBox;
     projection->setObjectName("cameraRawProjection");
-    projection->addItems({"Perspective", "Rectilinear"});
-    projection->setAccessibleName("Projection");
+    projection->addItems(compositor::ui::localizedList({"Perspective", "Rectilinear"}));
+    projection->setAccessibleName(compositor::ui::localized("Projection"));
     geometry->addWidget(upright);
     geometry->addWidget(projection);
     geometry->addWidget(toolButton("Draw Guides", Tool::Guide));
-    auto* clearGuides = new QPushButton("Clear Guides");
-    clearGuides->setAccessibleName("Clear Guides");
+    auto* clearGuides = new QPushButton(compositor::ui::localized("Clear Guides"));
+    clearGuides->setAccessibleName(compositor::ui::localized("Clear Guides"));
     geometry->addWidget(clearGuides);
     addSlider(geometry, "Vertical", &settings_.geometry.vertical, -100, 100, 0, 0, 0, {}, false);
     addSlider(geometry, "Horizontal", &settings_.geometry.horizontal, -100, 100, 0, 0, 0, {}, false);
@@ -1120,8 +1121,8 @@ void CameraRawPanel::build() {
     addSlider(geometry, "Scale", &settings_.geometry.scale, -100, 100, 0, 0, 0, {}, false);
     addSlider(geometry, "Offset X", &settings_.geometry.offsetX, -100, 100, 0, 0, 0, {}, false);
     addSlider(geometry, "Offset Y", &settings_.geometry.offsetY, -100, 100, 0, 0, 0, {}, false);
-    auto* constrain = new QCheckBox("Constrain Crop");
-    constrain->setAccessibleName("Constrain Crop");
+    auto* constrain = new QCheckBox(compositor::ui::localized("Constrain Crop"));
+    constrain->setAccessibleName(compositor::ui::localized("Constrain Crop"));
     geometry->addWidget(constrain);
     connect(upright, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int id) {
         if (writing_) return;
@@ -1145,8 +1146,8 @@ void CameraRawPanel::build() {
     auto* calibration = addSection(sections, "Calibration", "calibration", false, &eyes_.calibration, [this] { return settings_.calibration.adjusts(); });
     auto* process = new QComboBox;
     process->setObjectName("cameraRawProcess");
-    process->addItems({"Version 1", "Version 2", "Version 3", "Version 4", "Version 5", "Version 6"});
-    process->setAccessibleName("Process");
+    process->addItems(compositor::ui::localizedList({"Version 1", "Version 2", "Version 3", "Version 4", "Version 5", "Version 6"}));
+    process->setAccessibleName(compositor::ui::localized("Process"));
     processSummary_ = new QLabel;
     processSummary_->setWordWrap(true);
     processSummary_->setObjectName("cameraRawProcessSummary");

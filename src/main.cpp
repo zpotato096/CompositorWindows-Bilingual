@@ -1,4 +1,5 @@
 #include "ui/MainWindow.h"
+#include "ui/InterfaceLanguage.h"
 #include "ui/WhatsNew.h"
 #include "AppLogging.h"
 #include "persistence/ProjectStore.h"
@@ -30,6 +31,12 @@ int main(int argc,char**argv){
             compositor::imaging::OnnxSubjectProvider provider(std::filesystem::path(model.toStdWString()));
             compositor::imaging::RgbaImage image{2,2,8,std::vector<uint8_t>(16,255)};
             provider.healthCheck();
+            const auto depth=QApplication::applicationDirPath()+"/models/depthmini.onnx";
+            if(QFileInfo::exists(depth)){
+                compositor::imaging::RgbaImage gradient{2,2,8,{0,0,0,255,255,0,0,255,0,255,0,255,255,255,255,255}};
+                if(compositor::imaging::inferDepthMini(std::filesystem::path(depth.toStdWString()),gradient).size()!=4)
+                    throw std::runtime_error("DepthMini health check failed");
+            }
             QTemporaryDir directory;if(!directory.isValid())throw std::runtime_error("No writable temporary directory");
             auto path=std::filesystem::path((directory.path()+"/check.png").toStdWString());compositor::imaging::WicCodec::encode(path,image,{});auto decoded=compositor::imaging::WicCodec::decode(path);if(decoded.image.pixels!=image.pixels)throw std::runtime_error("Image codec health check failed");
             return 0;
@@ -45,6 +52,7 @@ int main(int argc,char**argv){
             compositor::exportDocumentAtomic(d,std::filesystem::path(args[output+1].toStdWString()),options,limits);return 0;
         }catch(const std::exception&e){QTextStream(stderr)<<e.what()<<Qt::endl;return 2;}
     }
+    compositor::ui::initializeInterfaceLanguage();
     compositor::MainWindow window(args.contains("--warp"));window.show();
     if(args.contains("--feasibility")||args.contains("--ui-test"))window.addFeasibilityDocument();
     if(args.contains("--ui-test")){

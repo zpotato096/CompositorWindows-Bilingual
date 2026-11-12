@@ -1,0 +1,16 @@
+/build/
+/out/
+/dist/
+/.vs/
+/.idea/
+/CMakeUserPresets.json
+/dependencies/downloads/
+/dependencies/qt/
+/dependencies/imaging/*
+!/dependencies/imaging/lock.json
+!/dependencies/imaging/model-requirements.hashes.txt
+/dependencies/packaging/*
+!/dependencies/packaging/lock.json
+!/dependencies/packaging/notices/
+__pycache__/
+*.user

@@ -303,6 +303,7 @@ public:
     bool markSavedIfCurrent(uint64_t revision){ if(revision!=revision_)return false; savedRevision_=revision; return true; }
     void reset();
     bool modified() const {return revision_!=savedRevision_;}
+    bool editing() const {return depth_!=0;}
     bool canUndo() const {return depth_==0&&!past_.empty();}
     bool canRedo() const {return depth_==0&&!future_.empty();}
     std::string undoName() const {return past_.empty()?"":past_.back().name;}

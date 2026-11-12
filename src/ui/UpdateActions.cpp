@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "MainWindow.h"
 #include "AppLogging.h"
 #include "UpdatePanel.h"
@@ -114,14 +115,14 @@ void MainWindow::finishReleaseCheck(const QByteArray& response,const QString& fe
 void MainWindow::showUpdateNotice(const QString& version,const QString& running,const QString& pageUrl){
     for(auto* old:findChildren<QDialog*>("updateAvailableNotice")){old->setObjectName({});old->close();}
     auto* notice=new QDialog(this);notice->setObjectName("updateAvailableNotice");notice->setAttribute(Qt::WA_DeleteOnClose);
-    notice->setWindowTitle("Update Available");notice->setWindowModality(Qt::NonModal);notice->setProperty("releaseVersion",version);
+    notice->setWindowTitle(compositor::ui::localized("Update Available"));notice->setWindowModality(Qt::NonModal);notice->setProperty("releaseVersion",version);
     auto* layout=new QVBoxLayout(notice);
     auto* text=new QLabel(QString("Compositor %1 is available. You are running %2.\n\nInstallation stays manual: download the new MSI or portable package from the release page. Compositor does not verify the download itself.").arg(version,running));
     text->setObjectName("updateNoticeText");text->setWordWrap(true);layout->addWidget(text);
     auto* row=new QHBoxLayout;layout->addLayout(row);
-    auto* download=new QPushButton("Download…");download->setObjectName("updateNoticeDownload");download->setDefault(true);
-    auto* skip=new QPushButton("Skip This Version");skip->setObjectName("updateNoticeSkip");
-    auto* later=new QPushButton("Later");later->setObjectName("updateNoticeLater");
+    auto* download=new QPushButton(compositor::ui::localized("Download…"));download->setObjectName("updateNoticeDownload");download->setDefault(true);
+    auto* skip=new QPushButton(compositor::ui::localized("Skip This Version"));skip->setObjectName("updateNoticeSkip");
+    auto* later=new QPushButton(compositor::ui::localized("Later"));later->setObjectName("updateNoticeLater");
     row->addWidget(download);row->addStretch();row->addWidget(skip);row->addWidget(later);
     connect(download,&QPushButton::clicked,notice,[this,notice,pageUrl]{
         const QUrl url(pageUrl);

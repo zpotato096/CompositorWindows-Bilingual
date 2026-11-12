@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "NativeCanvas.h"
 #include "imaging/cmyk.h"
 #include <QtConcurrent/QtConcurrentRun>
@@ -20,7 +21,7 @@ void NativeCanvas::setCmykProof(CmykProfilePtr profile,bool enabled){
     if(!proofConnected_){proofConnected_=true;connect(&proofWatcher_,&QFutureWatcher<ProofResult>::finished,this,[this]{
         const auto result=proofWatcher_.result();
         if(proofEnabled_&&proofProfile_&&result.hash==proofProfile_->sha256&&!result.cancelled){
-            if(!result.error.isEmpty()){proofFailure_=result.error;setToolTip("CMYK proof unavailable: "+result.error);}
+            if(!result.error.isEmpty()){proofFailure_=result.error;setToolTip(compositor::ui::localized("CMYK proof unavailable: ")+result.error);}
             else {proofLut_=result.lookup;proofLutHash_=result.hash;setToolTip({});}
             resetCmykResources();update();
         }
@@ -32,7 +33,7 @@ void NativeCanvas::setCmykProof(CmykProfilePtr profile,bool enabled){
 void NativeCanvas::startCmykLookup(){
     if(!proofEnabled_||!proofProfile_||proofWatcher_.isRunning())return;
     auto profile=proofProfile_;proofCancelled_=std::make_shared<std::atomic_bool>(false);auto cancel=proofCancelled_;
-    setToolTip("Preparing CMYK proof…");
+    setToolTip(compositor::ui::localized("Preparing CMYK proof…"));
     proofWatcher_.setFuture(QtConcurrent::run([profile,cancel]{ProofResult result;result.hash=profile->sha256;
         try{result.lookup=imaging::cmykProofLookup(profile,[cancel]{return cancel->load();});}
         catch(const std::exception& error){result.error=QString::fromUtf8(error.what());}
@@ -59,7 +60,7 @@ bool NativeCanvas::beginCmykProof(){
             proofCheck(context_->CreateBitmap(size,nullptr,0,&properties,&proofScene_),"Cannot allocate CMYK proof viewport");proofEffect_->SetInput(0,proofScene_.Get());
         }
         context_->GetTarget(&proofDestination_);context_->SetTarget(proofScene_.Get());context_->Clear(D2D1::ColorF(1,1,1));proofApplied_=true;return true;
-    }catch(const std::exception& error){proofFailure_=QString::fromUtf8(error.what());setToolTip("CMYK proof unavailable: "+proofFailure_);resetCmykResources();return false;}
+    }catch(const std::exception& error){proofFailure_=QString::fromUtf8(error.what());setToolTip(compositor::ui::localized("CMYK proof unavailable: ")+proofFailure_);resetCmykResources();return false;}
 }
 void NativeCanvas::finishCmykProof(D2D1_RECT_F bounds){
     if(!proofApplied_)return;

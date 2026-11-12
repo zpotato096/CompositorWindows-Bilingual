@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "FocusStackJob.h"
 #include "editing/FocusStack.h"
 #include <QFutureWatcher>
@@ -84,7 +85,7 @@ struct FocusStackJob::Impl {
     QFutureWatcher<Result> watcher;
     QProgressDialog progress;
     explicit Impl(QWidget* parent):progress("Focus stacking images…","Cancel",0,0,parent){
-        progress.setObjectName("focusStackProgress");progress.setWindowTitle("Focus Stack");
+        progress.setObjectName("focusStackProgress");progress.setWindowTitle(compositor::ui::localized("Focus Stack"));
         // Already styled, so the chrome handler keeps Qt's layout; otherwise the label and Cancel button are hidden.
         progress.setProperty("studioChrome",true);
         progress.setBar(new BusyBar(&progress));

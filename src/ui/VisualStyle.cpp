@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "VisualStyle.h"
 #include "CommandRegistry.h"
 #include "EditorIcons.h"
@@ -325,11 +326,11 @@ void styleWorkspace(QMainWindow* window) {
         }
         if(dock->widget()&&dock->widget()->layout())dock->widget()->layout()->setContentsMargins(12,10,12,12);
     }
-    auto menus=menu->actions();auto findMenu=[&](const QString& label)->QMenu*{for(auto* action:menus)if(action->text().remove('&')==label)return action->menu();return nullptr;};
+    auto menus=menu->actions();auto findMenu=[&](const QString& label)->QMenu*{for(auto* action:menus)if(action->menu()&&ui::menuSourceTitle(action->menu()).remove('&')==label)return action->menu();return nullptr;};
     if(auto* view=findMenu("View")){
-        view->addSeparator();auto* appearance=view->addMenu("Appearance");
-        auto* mac=appearance->addAction("Mac-style title bar");mac->setObjectName("macTitleBarAction");mac->setCheckable(true);mac->setChecked(macTitleBarEnabled());if(const auto* spec=ui::commandSpec("Appearance","Mac-style title bar"))mac->setProperty("commandId",spec->id);
-        mac->setToolTip("Use colored window controls on the left. Turn off for the native Windows title bar.");
+        view->addSeparator();auto* appearance=compositor::ui::localizedMenu(view, "Appearance");
+        auto* mac=appearance->addAction(compositor::ui::localized("Mac-style title bar"));mac->setObjectName("macTitleBarAction");mac->setCheckable(true);mac->setChecked(macTitleBarEnabled());if(const auto* spec=ui::commandSpec("Appearance","Mac-style title bar"))mac->setProperty("commandId",spec->id);
+        mac->setToolTip(compositor::ui::localized("Use colored window controls on the left. Turn off for the native Windows title bar."));
         QObject::connect(mac,&QAction::toggled,window,[](bool enabled){setMacTitleBarEnabled(enabled);});
     }
     for(const auto& pair:{std::pair{"Clipboard","Edit"},std::pair{"Adjustments","Image"},std::pair{"Canvas","Image"},std::pair{"Transform","Layer"}})

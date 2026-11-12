@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "ProjectChrome.h"
 #include "EditorIcons.h"
 #include <QAbstractButton>
@@ -46,7 +47,7 @@ public:
     int indexOfChild(const QAccessibleInterface*) const override { return -1; }
     QString text(QAccessible::Text type) const override {
         return isValid() && (type == QAccessible::Name || type == QAccessible::Description)
-            ? QString("Close %1").arg(page_->property(titleProperty).toString()) : QString{};
+            ? compositor::ui::localized("Close %1").arg(page_->property(titleProperty).toString()) : QString{};
     }
     void setText(QAccessible::Text, const QString&) override {}
     QRect rect() const override {
@@ -307,7 +308,7 @@ void installProjectChrome(QMainWindow* window, QTabWidget* tabs, QDockWidget* do
         QAccessible::deleteAccessibleInterface(QAccessible::uniqueId(existing));
     if (auto* existing = QAccessible::queryAccessibleInterface(tabs->tabBar()); existing && !dynamic_cast<ProjectTabBar*>(existing))
         QAccessible::deleteAccessibleInterface(QAccessible::uniqueId(existing));
-    tabs->setAccessibleName("Project workspace"); tabs->tabBar()->setAccessibleName("Project tabs");
+    tabs->setAccessibleName(compositor::ui::localized("Project workspace")); tabs->tabBar()->setAccessibleName(compositor::ui::localized("Project tabs"));
     // Both docks share a QMainWindow column. Keep all numeric contents visible
     // by wrapping Transform labels when the source-sized Layers panel narrows.
     if (auto* transform = window->findChild<QDockWidget*>("transformDock"))
@@ -328,8 +329,8 @@ void refreshProjectTabs(QTabWidget* tabs, bool canClose, const QStringList& titl
         const auto title = i < titles.size() ? titles[i] : tabs->tabText(i);
         tabs->widget(i)->setProperty(titleProperty, title);
         if (auto* button = closeButton(tabs, i)) {
-            button->setAccessibleName(QString("Close %1").arg(title));
-            button->setToolTip(QString("Close %1").arg(title)); button->setEnabled(canClose);
+            button->setAccessibleName(compositor::ui::localized("Close %1").arg(title));
+            button->setToolTip(compositor::ui::localized("Close %1").arg(title)); button->setEnabled(canClose);
         }
     }
     if (QAccessible::isActive()) {

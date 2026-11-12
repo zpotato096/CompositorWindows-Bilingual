@@ -1,3 +1,5 @@
+#include "InterfaceLanguage.h"
+#include "LightingAnalysis.h"
 #include "MainWindow.h"
 #include "LastFilterJob.h"
 #include "CameraRawPanel.h"
@@ -30,6 +32,7 @@
 #include <QSignalBlocker>
 #include <QStatusBar>
 #include <QMessageBox>
+#include <QCoreApplication>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -117,12 +120,14 @@ std::function<Layer(const Layer&)> filterMerge(const Layer& rendered,const Layer
         return carryFilterMask(current,std::move(layer),job,rendered.raster!=original.raster||rendered.transform!=original.transform);
     };
 }
-QStringList filterKindNames(){return {"Gaussian Blur","Motion Blur","Add Noise","Lens Correction","Content-Aware Fill","Vignette","Bloom","Tonal Contrast","Dither","Scanlines","Camera Raw Filter","Progressive Blur","RGB Split","Lens Effects"};}
+QStringList filterKindNames(){return {"Gaussian Blur","Motion Blur","Add Noise","Lens Correction","Content-Aware Fill","Vignette","Bloom","Tonal Contrast","Dither","Scanlines","Camera Raw Filter","Progressive Blur","RGB Split","Lens Effects","Sharpen","Reduce Noise","Rim Light","Volumetric Light"};}
 filters::Request buildFilterRequest(EditorProject& project,const Document& before,const Layer& layer,filters::Kind kind){
     filters::Request request;request.settings=project.toolState.filterSettings.pixels;request.cameraRaw=project.toolState.filterSettings.cameraRaw.normalized();
     request.kind=kind;request.deepSource=layer.deep;request.source=layer.raster?layer.raster:Raster::filled(before.width,before.height);
     request.transform=layer.raster?layer.transform:Transform{0,0,double(before.width),double(before.height)};
     request.canvasWidth=before.width;request.canvasHeight=before.height;
+    if(filters::isLighting(request))request.prepareLighting=ui::prepareLightingAnalysis(request.source,
+        QCoreApplication::applicationDirPath()+"/models",kind==filters::Kind::VolumetricLight);
     request.seed=QRandomGenerator::global()->generate();
     if(kind!=filters::Kind::CameraRaw)request.selection=filterSelection(before,layer,kind);
     if(kind==filters::Kind::Dither&&request.settings.ditherLevels<=0)request.settings.ditherLevels=4;
@@ -190,7 +195,7 @@ class FilterPanel final:public ui::EditPanelSession {
     QVBoxLayout layout_;
     QFormLayout fields_;
     QLabel thumbnail_,status_;
-    QCheckBox preview_{"Preview"};
+    QCheckBox preview_{compositor::ui::localized("Preview")};
     QDialogButtonBox buttons_{QDialogButtonBox::Apply|QDialogButtonBox::Cancel};
     QPushButton* apply_{};
     QTimer debounce_;
@@ -204,32 +209,101 @@ class FilterPanel final:public ui::EditPanelSession {
     std::array<std::shared_ptr<const Raster>,4> channels_;
     filters::CameraRawView runningRawView_;
     std::uint64_t version_{},runningVersion_{},retainedPreviewBytes_{};
-    bool running_{},runningViewportOnly_{},balanceRunning_{},closed_{},committing_{},progressiveDragging_{},rgbDragging_{},splitLayers_{};
+    bool running_{},runningViewportOnly_{},balanceRunning_{},closed_{},committing_{},progressiveDragging_{},rgbDragging_{},volumeDragging_{},splitLayers_{},extractDepth_{};
     static std::map<filters::Kind,QPoint>& positions(){static std::map<filters::Kind,QPoint> value;return value;}
     bool autoBalancePending()const{return balanceRunning_&&raw_&&raw_->whiteBalanceIsAuto();}
     void retire(){if(closed_&&!running_&&!balanceRunning_)deleteLater();}
-    void beginSplitToLayers(QPushButton* split){
+    static void lightSwatch(QPushButton* button,const std::array<double,3>& color){
+        const auto value=QColor::fromRgbF(float(color[0]),float(color[1]),float(color[2]));
+        button->setStyleSheet(QStringLiteral("border-left: 12px solid %1; padding-left: 8px;").arg(value.name()));
+    }
+    void pickLightColor(QPushButton* button,std::array<double,3>& color){
+        if(!host_.openColor||closed_||committing_||splitLayers_)return;
+        host_.openColor({color[0],color[1],color[2]},ui::localized("Light Color"),
+            [owner=QPointer<FilterPanel>(this),button=QPointer<QPushButton>(button),target=&color](effects_tools::PaletteColor value){
+                if(!owner||!button||owner->closed_||owner->committing_||owner->splitLayers_)return;
+                *target={value.red,value.green,value.blue};lightSwatch(button,*target);owner->change();
+            });
+    }
+    void addRimControls(){
+        auto* row=new QWidget;
+        auto* layout=new QHBoxLayout(row);layout->setContentsMargins(0,0,0,0);
+        auto* lamps=new QComboBox;lamps->setObjectName("rimLamp");
+        auto* add=new QPushButton(ui::localized("Add Light"));
+        auto* remove=new QPushButton(ui::localized("Remove Light"));
+        auto* color=new QPushButton(ui::localized("Light Color"));
+        layout->addWidget(lamps,1);layout->addWidget(add);layout->addWidget(remove);
+        fields_.addRow(ui::localized("Light"),row);fields_.addRow(color);
+        using Member=double filters::RimLamp::*;
+        constexpr std::array<Member,4> members{&filters::RimLamp::angle,&filters::RimLamp::strength,&filters::RimLamp::width,&filters::RimLamp::choke};
+        constexpr std::array labels{"Angle","Strength","Width","Choke"};
+        std::array<QDoubleSpinBox*,4> controls{};
+        for(std::size_t i=0;i<controls.size();++i){
+            auto* value=new ui::PropertyNumber;
+            value->setRange(i==0?-180:0,i==0?180:100);value->setDecimals(0);
+            value->setSuffix(i==0?QStringLiteral("°"):QStringLiteral("%"));
+            value->setAccessibleName(ui::localized(labels[i]));fields_.addRow(ui::localized(labels[i]),value);
+            controls[i]=value;
+            connect(value,&QDoubleSpinBox::valueChanged,&dialog_,[this,lamps,field=members[i]](double next){
+                if(lamps->currentIndex()<0)return;
+                request_.settings.rim.lights[lamps->currentIndex()].*field=next;change();
+            });
+        }
+        auto refresh=[this,lamps,controls,add,remove,color,members](int current){
+            auto& settings=request_.settings.rim;
+            const QSignalBlocker block(lamps);
+            lamps->clear();
+            for(int i=0;i<settings.count;++i)lamps->addItem(ui::localized("Light %1").arg(i+1));
+            current=std::clamp(current,0,settings.count-1);lamps->setCurrentIndex(current);
+            const auto& light=settings.lights[current];
+            for(std::size_t i=0;i<controls.size();++i){QSignalBlocker hold(controls[i]);controls[i]->setValue(light.*members[i]);}
+            lightSwatch(color,light.color);
+            add->setEnabled(settings.count<3);remove->setEnabled(settings.count>1);
+        };
+        connect(lamps,&QComboBox::currentIndexChanged,&dialog_,[this,refresh](int index){
+            if(index>=0){if(host_.closeColor)host_.closeColor(true);refresh(index);}
+        });
+        connect(add,&QPushButton::clicked,&dialog_,[this,refresh]{
+            auto& settings=request_.settings.rim;if(settings.count>=3)return;
+            if(host_.closeColor)host_.closeColor(true);
+            const auto previous=settings.lights[settings.count-1];
+            auto next=filters::RimLightingSettings{}.lights[settings.count];
+            next.angle=previous.angle>0?previous.angle-180:previous.angle+180;
+            next.width=previous.width;next.choke=previous.choke;
+            settings.lights[settings.count++]=next;refresh(settings.count-1);change();
+        });
+        connect(remove,&QPushButton::clicked,&dialog_,[this,lamps,refresh]{
+            auto& settings=request_.settings.rim;if(settings.count<=1)return;
+            if(host_.closeColor)host_.closeColor(true);
+            const int index=lamps->currentIndex();
+            for(int i=index;i<settings.count-1;++i)settings.lights[i]=settings.lights[i+1];
+            --settings.count;refresh(index);change();
+        });
+        connect(color,&QPushButton::clicked,&dialog_,[this,lamps,color]{pickLightColor(color,request_.settings.rim.lights[lamps->currentIndex()].color);});
+        refresh(0);
+    }
+    void beginSplitToLayers(QPushButton* split,bool depth=false){
         if(closed_||committing_||splitLayers_||!split)return;
         const auto current=host_.currentDocument?host_.currentDocument():std::nullopt;
         if(!current)return;
         auto target=std::find_if(current->layers.begin(),current->layers.end(),[this](const Layer& layer){return layer.id==original_.id;});
         if(target==current->layers.end()||!target->raster||target->raster!=original_.raster||
            target->deep!=original_.deep||target->transform!=original_.transform){
-            status_.setText("The source layer changed. Reopen RGB Split to split its channels.");
+            status_.setText(ui::localized(depth?"The source layer changed. Reopen Volumetric Light to extract depth.":"The source layer changed. Reopen RGB Split to split its channels."));
             return;
         }
         const auto pixelCount=[](const Raster& raster){return std::uint64_t(raster.width)*raster.height;};
-        auto pixels=4*pixelCount(*target->raster);
+        auto pixels=(depth?1:4)*pixelCount(*target->raster);
         for(const auto& layer:current->layers)if(layer.raster)pixels+=pixelCount(*layer.raster);
         if(pixels>maxDocumentImagePixels){
-            QMessageBox warning(QMessageBox::Warning,"Cannot Split to Layers",
-                QString("The four channel layers would exceed the project's combined %1-megapixel image limit. Reduce the image size or remove other image layers before trying again.")
+            QMessageBox warning(QMessageBox::Warning,ui::localized(depth?"Cannot Extract Depth":"Cannot Split to Layers"),
+                ui::localized("The new layers would exceed the project's combined %1-megapixel image limit.")
                     .arg(maxDocumentImagePixels/1'000'000),
                 QMessageBox::Ok,&dialog_);
             warning.setProperty("studioChrome",true);warning.exec();
             return;
         }
-        splitLayers_=true;
+        splitLayers_=true;extractDepth_=depth;
         ++version_;
         rgbDragging_=false;
         cancelled_->store(true);
@@ -242,7 +316,8 @@ class FilterPanel final:public ui::EditPanelSession {
             for(auto* control:dialog_.findChildren<QSlider*>())control->setEnabled(false);
         completedPreview_.reset();
         clearGuideOverlay();
-        status_.setText("Splitting channels…");
+        if(depth&&host_.closeColor)host_.closeColor(true);
+        status_.setText(ui::localized(depth?"Extracting depth…":"Splitting channels…"));
         publishPreview();
         start();
     }
@@ -255,7 +330,7 @@ class FilterPanel final:public ui::EditPanelSession {
             // Let ordinary grades finish and keep only the latest settings.
             // Recomposition and superseded diagnostics can be cancelled.
             if(running_&&(runningViewportOnly_||runningRawView_!=request_.cameraRawView))cancelled_->store(true);
-            if(!running_&&!debounce_.isActive()){status_.setText("Updating preview…");debounce_.start();}
+            if(!running_&&!debounce_.isActive()){status_.setText(compositor::ui::localized("Updating preview…"));debounce_.start();}
             return;
         }
         if(running_)cancelled_->store(true);
@@ -288,6 +363,10 @@ class FilterPanel final:public ui::EditPanelSession {
             return;
         }
         if(request_.kind==filters::Kind::RgbSplit){canvas->setCameraRawGuides({});return;}
+        if(request_.kind==filters::Kind::VolumetricLight&&request_.settings.volume.center){
+            const auto c=*request_.settings.volume.center;
+            canvas->setCameraRawGuides({{{c.x-12,c.y},{c.x+12,c.y}},{{c.x,c.y-12},{c.x,c.y+12}}});return;
+        }
         if(!raw_)return;
         const auto guides=raw_->guideOverlay();
         std::vector<std::pair<Point,Point>> lines;lines.reserve(guides.size());
@@ -324,11 +403,12 @@ class FilterPanel final:public ui::EditPanelSession {
         running_=true;runningVersion_=version_;runningRawView_=request_.cameraRawView;
         cancelled_=std::make_shared<std::atomic_bool>(false);
         if(splitLayers_){
-            worker_.setFuture(QtConcurrent::run([source=original_.raster,limits=request_.limits,token=cancelled_]() mutable {
+            worker_.setFuture(QtConcurrent::run([job=request_,depth=extractDepth_,token=cancelled_]() mutable {
                 FilterOutput out;
                 try{
-                    limits.cancelled=[token]{return token->load();};
-                    out.channels=filters::splitChannels(*source,limits);
+                    job.limits.cancelled=[token]{return token->load();};
+                    if(depth)out.channels[0]=filters::extractLightingDepth(job);
+                    else out.channels=filters::splitChannels(*job.source,job.limits);
                 }catch(const std::exception& error){out.error=QString::fromUtf8(error.what());}
                 return out;
             }));
@@ -348,7 +428,7 @@ class FilterPanel final:public ui::EditPanelSession {
             job.cameraRawRetainedPreviewBytes=retainedPreviewBytes_;
         }
         if((job.kind==filters::Kind::ProgressiveBlur||job.kind==filters::Kind::RgbSplit||job.kind==filters::Kind::LensEffects)&&job.preview)job.previewMaxEdge=512;
-        if(!existingGrade)status_.setText(committing_?"Applying filter…":"Updating preview…");
+        if(!existingGrade)status_.setText(ui::localized(committing_?"Applying filter…":"Updating preview…"));
         const int navigatorEdge=existingGrade?std::exchange(pendingNavigatorEdge_,0):0;
         worker_.setFuture(QtConcurrent::run([job,before=before_,original=original_,selection=rawSelection_,
                                              viewport=runningViewport_,cache=rawViewportCache_,existingGrade,navigatorEdge]() mutable {
@@ -402,7 +482,11 @@ class FilterPanel final:public ui::EditPanelSession {
     void finish(int answer){
         if(closed_)return;closed_=true;cancelled_->store(true);debounce_.stop();if(request_.kind!=filters::Kind::CameraRaw)positions()[request_.kind]=dialog_.pos();
         if(balanceCancelled_)balanceCancelled_->store(true);
-        try{if(answer==QDialog::Accepted&&splitLayers_&&channels_.front()&&host_.commit){
+        try{if(answer==QDialog::Accepted&&extractDepth_&&channels_.front()&&host_.commit){
+            Layer depth;depth.id=newId();depth.name="Depth";depth.raster=std::move(channels_[0]);
+            const auto id=depth.id;
+            host_.commit({{},id,false,{},{std::move(depth)},"Extract Depth"});
+        }else if(answer==QDialog::Accepted&&splitLayers_&&channels_.front()&&host_.commit){
             constexpr std::array names{"Red","Green","Blue","Alpha"};
             std::vector<Layer> layers;
             layers.reserve(names.size());
@@ -425,6 +509,7 @@ class FilterPanel final:public ui::EditPanelSession {
             if(rememberLast_)rememberLast_(request_.kind);
         }}
         catch(const std::exception& error){if(host_.error)host_.error(QString::fromUtf8(error.what()));}
+        if(filters::isLighting(request_)&&host_.closeColor)host_.closeColor(answer==QDialog::Accepted);
         clearRawViewportProviders();
         completedPreview_.reset();rawViewportCache_.reset();clearGuideOverlay();if(host_.preview)host_.preview({});if(host_.closed)host_.closed();host_={};retire();
     }
@@ -439,44 +524,76 @@ public:
         :EditPanelSession(parent,Kind::Filter,false,std::move(host)),before_(std::move(before)),original_(std::move(original)),request_(std::move(request)),remember_(std::move(remember)),rememberRaw_(std::move(rememberRaw)),rememberLast_(std::move(rememberLast)),currentCrop_(std::move(currentCrop)),dialog_(parent),layout_(&dialog_){
         const bool cameraRaw=request_.kind==filters::Kind::CameraRaw;
         if(cameraRaw)buttons_.setStandardButtons(QDialogButtonBox::Ok|QDialogButtonBox::Cancel);
-        dialog_.mayReject=[this]{return !committing_;};dialog_.setObjectName("filterPanel");dialog_.setWindowTitle(title);dialog_.setWindowFlags(Qt::Tool|Qt::WindowTitleHint|Qt::WindowCloseButtonHint);dialog_.setWindowModality(Qt::NonModal);
+        dialog_.mayReject=[this]{return !committing_;};dialog_.setObjectName("filterPanel");dialog_.setWindowTitle(ui::localized(title));dialog_.setWindowFlags(Qt::Tool|Qt::WindowTitleHint|Qt::WindowCloseButtonHint);dialog_.setWindowModality(Qt::NonModal);
         layout_.addLayout(&fields_);thumbnail_.setObjectName("filterPreview");layout_.addWidget(&thumbnail_);thumbnail_.hide();
         preview_.setObjectName("filterPreviewEnabled");preview_.setChecked(true);layout_.addWidget(&preview_);
         status_.setObjectName("filterPreviewStatus");status_.setWordWrap(true);status_.setStyleSheet("color: #989ba3; font-size: 11px;");layout_.addWidget(&status_);
-        if(cameraRaw&&before_.selection){auto* note=new QLabel("Limited to the selection");note->setObjectName("cameraRawSelection");layout_.addWidget(note);}
+        if(cameraRaw&&before_.selection){auto* note=new QLabel(compositor::ui::localized("Limited to the selection"));note->setObjectName("cameraRawSelection");layout_.addWidget(note);}
         layout_.addWidget(&buttons_);apply_=buttons_.button(cameraRaw?QDialogButtonBox::Ok:QDialogButtonBox::Apply);apply_->setEnabled(cameraRaw);apply_->setDefault(true);buttons_.button(QDialogButtonBox::Cancel)->setAutoDefault(false);
         layout_.setContentsMargins(18,16,18,16);layout_.setSpacing(12);fields_.setVerticalSpacing(12);
         debounce_.setSingleShot(true);debounce_.setInterval(cameraRaw?16:120);
         const filters::Settings factory{};
         auto number=[this](const QString& label,double& value,double low,double high,int decimals,double fallback){
-            auto* spin=new ui::PropertyNumber;spin->setRange(low,high);spin->setDecimals(decimals);const int stepDecimals=label=="Radius"||label=="Amount"||label=="From"||label=="To"||label=="Threshold"||label=="Midpoint"?decimals:0;spin->setSingleStep(std::pow(10.,-stepDecimals));spin->setValue(value);spin->setAccessibleName(label);auto* row=new QWidget;auto* layout=new QHBoxLayout(row);layout->setContentsMargins(0,0,0,0);
+            auto* spin=new ui::PropertyNumber;spin->setRange(low,high);spin->setDecimals(decimals);const int stepDecimals=label=="Radius"||label=="Amount"||label=="From"||label=="To"||label=="Threshold"||label=="Midpoint"?decimals:0;spin->setSingleStep(std::pow(10.,-stepDecimals));spin->setValue(value);spin->setAccessibleName(ui::localized(label));auto* row=new QWidget;auto* layout=new QHBoxLayout(row);layout->setContentsMargins(0,0,0,0);
+            if(filters::isLighting(request_))spin->setSuffix("%");
             auto* slider=new ui::TrackSlider(Qt::Horizontal);slider->setRange(0,10000);slider->setAccessibleName(label+" slider");
             const bool logarithmic=(label=="Radius"||label=="Distance"||label=="Amount")&&low>0;
             const double first=logarithmic?std::log(low):low,last=logarithmic?std::log(high):high;
             auto position=[first,last,logarithmic](double v){return int(std::lround(((logarithmic?std::log(v):v)-first)/(last-first)*10000));};
-            slider->setValue(position(spin->value()));slider->setDefaultValue(position(fallback));layout->addWidget(slider,1);layout->addWidget(spin);fields_.addRow(label,row);
+            slider->setValue(position(spin->value()));slider->setDefaultValue(position(fallback));layout->addWidget(slider,1);layout->addWidget(spin);fields_.addRow(ui::localized(label),row);
             connect(slider,&QSlider::valueChanged,&dialog_,[spin,first,last,logarithmic,stepDecimals](int v){const double normalized=first+(last-first)*v/10000.;const double factor=std::pow(10.,stepDecimals);spin->setValue(std::round((logarithmic?std::exp(normalized):normalized)*factor)/factor);});
             connect(spin,&QDoubleSpinBox::valueChanged,&dialog_,[slider,position](double v){QSignalBlocker block(slider);slider->setValue(position(v));});
             connect(spin,&QDoubleSpinBox::valueChanged,&dialog_,[this,field=&value](double next){*field=next;change();});
         };
         switch(request_.kind){
+        case filters::Kind::RimLight:
+            number("Glow",request_.settings.rim.glow,0,100,0,factory.rim.glow);
+            addRimControls();
+            break;
+        case filters::Kind::VolumetricLight:{
+            auto& v=request_.settings.volume;
+            fields_.addRow(new QLabel(ui::localized("Click or drag on the canvas to move the light")));
+            auto* color=new QPushButton(ui::localized("Light Color"));lightSwatch(color,v.color);fields_.addRow(color);
+            connect(color,&QPushButton::clicked,&dialog_,[this,color]{pickLightColor(color,request_.settings.volume.color);});
+            number("Haze",v.haze,0,100,0,factory.volume.haze);
+            number("Distance",v.distance,0,100,0,factory.volume.distance);
+            number("Depth Contrast",v.depthContrast,0,100,0,factory.volume.depthContrast);
+            number("Size",v.size,0,100,0,factory.volume.size);
+            number("Intensity",v.intensity,0,100,0,factory.volume.intensity);
+            number("Length",v.length,0,100,0,factory.volume.length);
+            number("Shafts",v.shafts,0,100,0,factory.volume.shafts);
+            auto* clear=new QCheckBox(ui::localized("Keep Subject Clear"));clear->setChecked(v.keepsSubjectClear);fields_.addRow(clear);
+            connect(clear,&QCheckBox::toggled,&dialog_,[this](bool value){request_.settings.volume.keepsSubjectClear=value;change();});
+            auto* extract=buttons_.addButton(ui::localized("Extract Depth"),QDialogButtonBox::ActionRole);extract->setObjectName("extractDepth");
+            connect(extract,&QPushButton::clicked,&dialog_,[this,extract]{beginSplitToLayers(extract,true);});
+            break;
+        }
         case filters::Kind::GaussianBlur:number("Radius",request_.settings.radius,.1,250,1,factory.radius);break;
         case filters::Kind::MotionBlur:number("Angle",request_.settings.angle,-90,90,1,factory.angle);number("Distance",request_.settings.distance,1,2000,1,factory.distance);break;
-        case filters::Kind::AddNoise:{number("Amount",request_.settings.amount,.1,400,1,factory.amount);auto* gaussian=new QCheckBox("Gaussian");auto* mono=new QCheckBox("Monochromatic");gaussian->setChecked(request_.settings.gaussian);mono->setChecked(request_.settings.monochromatic);fields_.addRow(gaussian);fields_.addRow(mono);connect(gaussian,&QCheckBox::toggled,&dialog_,[this](bool value){request_.settings.gaussian=value;change();});connect(mono,&QCheckBox::toggled,&dialog_,[this](bool value){request_.settings.monochromatic=value;change();});break;}
+        case filters::Kind::AddNoise:{number("Amount",request_.settings.amount,.1,400,1,factory.amount);auto* gaussian=new QCheckBox(compositor::ui::localized("Gaussian"));auto* mono=new QCheckBox(compositor::ui::localized("Monochromatic"));gaussian->setChecked(request_.settings.gaussian);mono->setChecked(request_.settings.monochromatic);fields_.addRow(gaussian);fields_.addRow(mono);connect(gaussian,&QCheckBox::toggled,&dialog_,[this](bool value){request_.settings.gaussian=value;change();});connect(mono,&QCheckBox::toggled,&dialog_,[this](bool value){request_.settings.monochromatic=value;change();});break;}
         case filters::Kind::LensCorrection:number("Distortion",request_.settings.distortion,-100,100,1,factory.distortion);break;
+        case filters::Kind::Sharpen:
+            number("Amount",request_.settings.sharpenAmount,0,300,0,factory.sharpenAmount);
+            number("Radius",request_.settings.sharpenRadius,.1,20,1,factory.sharpenRadius);
+            break;
+        case filters::Kind::ReduceNoise:
+            number("Strength",request_.settings.noiseStrength,0,100,0,factory.noiseStrength);
+            number("Details",request_.settings.noiseDetail,0,100,0,factory.noiseDetail);
+            number("Color",request_.settings.noiseColor,0,100,0,factory.noiseColor);
+            break;
         case filters::Kind::LensEffects:{
-            auto* mode=new QComboBox;mode->setObjectName("lensEffectMode");mode->addItems({"Anamorphic Flare","Starburst","Mist","Prism","Bokeh"});mode->setCurrentIndex(int(request_.settings.lens.effect));fields_.addRow("Effect",mode);
+            auto* mode=new QComboBox;mode->setObjectName("lensEffectMode");mode->addItems(compositor::ui::localizedList({"Anamorphic Flare","Starburst","Mist","Prism","Bokeh"}));mode->setCurrentIndex(int(request_.settings.lens.effect));fields_.addRow(compositor::ui::localized("Effect"),mode);
             auto& v=request_.settings.lens;const auto& d=factory.lens;
             std::array<std::pair<int,int>,5> rows;
             auto begin=[&](int i){rows[i].first=fields_.rowCount();};auto end=[&](int i){rows[i].second=fields_.rowCount();};
             begin(0);number("Threshold",v.threshold,50,100,1,d.threshold);number("Strength",v.flareAmount,0,100,1,d.flareAmount);number("Length",v.flareLength,1,100,1,d.flareLength);number("Blue",v.flareBlue,0,100,1,d.flareBlue);end(0);
             begin(1);number("Star strength",v.starAmount,0,100,1,d.starAmount);number("Star length",v.starLength,2,40,1,d.starLength);number("Star angle",v.starAngle,-180,180,1,d.starAngle);
-            auto* points=new QComboBox;points->setObjectName("lensStarPoints");points->addItems({"4","6","8","12","14"});points->setCurrentText(QString::number(v.starPoints));fields_.addRow("Points",points);connect(points,&QComboBox::currentTextChanged,&dialog_,[this](const QString& text){request_.settings.lens.starPoints=text.toInt();change();});end(1);
+            auto* points=new QComboBox;points->setObjectName("lensStarPoints");points->addItems(compositor::ui::localizedList({"4","6","8","12","14"}));points->setCurrentText(QString::number(v.starPoints));fields_.addRow(compositor::ui::localized("Points"),points);connect(points,&QComboBox::currentTextChanged,&dialog_,[this](const QString& text){request_.settings.lens.starPoints=text.toInt();change();});end(1);
             begin(2);number("Mist strength",v.mistStrength,0,100,1,d.mistStrength);number("Size",v.mistSize,0,100,1,d.mistSize);end(2);
             begin(3);number("Prism strength",v.prismAmount,0,100,1,d.prismAmount);number("Copies",v.prismCopies,1,8,0,d.prismCopies);number("Offset",v.prismOffset,0,50,1,d.prismOffset);number("Prism angle",v.prismAngle,-180,180,1,d.prismAngle);number("Blur",v.prismBlur,0,100,1,d.prismBlur);
-            auto* both=new QCheckBox("Both ways");both->setChecked(v.prismBothWays);fields_.addRow(both);connect(both,&QCheckBox::toggled,&dialog_,[this](bool checked){request_.settings.lens.prismBothWays=checked;change();});end(3);
+            auto* both=new QCheckBox(compositor::ui::localized("Both ways"));both->setChecked(v.prismBothWays);fields_.addRow(both);connect(both,&QCheckBox::toggled,&dialog_,[this](bool checked){request_.settings.lens.prismBothWays=checked;change();});end(3);
             begin(4);number("Radius",v.bokehRadius,.5,6,1,d.bokehRadius);number("Brightness",v.bokehBrightness,0,100,1,d.bokehBrightness);number("Ring",v.bokehRing,0,100,1,d.bokehRing);
-            auto* shape=new QComboBox;shape->setObjectName("lensBokehShape");shape->addItems({"Round","Hexagon","Oval","Cat's Eye"});shape->setCurrentIndex(int(v.bokehShape));fields_.addRow("Shape",shape);connect(shape,&QComboBox::currentIndexChanged,&dialog_,[this](int index){request_.settings.lens.bokehShape=filters::BokehShape(index);change();});end(4);
+            auto* shape=new QComboBox;shape->setObjectName("lensBokehShape");shape->addItems(compositor::ui::localizedList({"Round","Hexagon","Oval","Cat's Eye"}));shape->setCurrentIndex(int(v.bokehShape));fields_.addRow(compositor::ui::localized("Shape"),shape);connect(shape,&QComboBox::currentIndexChanged,&dialog_,[this](int index){request_.settings.lens.bokehShape=filters::BokehShape(index);change();});end(4);
             auto show=[this,rows](int index){for(int i=0;i<5;++i)for(int row=rows[i].first;row<rows[i].second;++row)fields_.setRowVisible(row,i==index||(i==0&&row==rows[0].first&&index==1));};show(mode->currentIndex());
             connect(mode,&QComboBox::currentIndexChanged,&dialog_,[this,show](int index){request_.settings.lens.effect=filters::LensEffect(index);show(index);dialog_.adjustSize();change();});break;
         }
@@ -490,8 +607,8 @@ public:
         case filters::Kind::ProgressiveBlur:{
             number("From",request_.settings.progressiveFrom,0,250,1,factory.progressiveFrom);
             number("To",request_.settings.progressiveTo,0,250,1,factory.progressiveTo);
-            auto* radial=new QCheckBox("Radial");radial->setChecked(request_.settings.progressiveRadial);fields_.addRow(radial);
-            auto* invert=new QCheckBox("Invert");invert->setChecked(request_.settings.progressiveInverted);fields_.addRow(invert);
+            auto* radial=new QCheckBox(compositor::ui::localized("Radial"));radial->setChecked(request_.settings.progressiveRadial);fields_.addRow(radial);
+            auto* invert=new QCheckBox(compositor::ui::localized("Invert"));invert->setChecked(request_.settings.progressiveInverted);fields_.addRow(invert);
             connect(radial,&QCheckBox::toggled,&dialog_,[this](bool value){request_.settings.progressiveRadial=value;change();});
             connect(invert,&QCheckBox::toggled,&dialog_,[this](bool value){request_.settings.progressiveInverted=value;change();});
             break;
@@ -500,14 +617,14 @@ public:
             number("Distance",request_.settings.rgbSplitDistance,0,200,1,factory.rgbSplitDistance);
             number("Blur",request_.settings.rgbSplitBlur,0,400,1,factory.rgbSplitBlur);
             number("Angle",request_.settings.rgbSplitAngle,-180,180,1,factory.rgbSplitAngle);
-            auto* radial=new QCheckBox("Radial");radial->setObjectName("rgbSplitRadial");radial->setChecked(request_.settings.rgbSplitRadial);fields_.addRow(radial);
+            auto* radial=new QCheckBox(compositor::ui::localized("Radial"));radial->setObjectName("rgbSplitRadial");radial->setChecked(request_.settings.rgbSplitRadial);fields_.addRow(radial);
             connect(radial,&QCheckBox::toggled,&dialog_,[this](bool value){request_.settings.rgbSplitRadial=value;syncGuideOverlay();change();});
-            auto* split=new QPushButton("Split to Layers");split->setObjectName("rgbSplitToLayers");fields_.addRow(split);
-            split->setToolTip("Create hidden grayscale layers from the original Red, Green, Blue and Alpha channels.");
+            auto* split=new QPushButton(compositor::ui::localized("Split to Layers"));split->setObjectName("rgbSplitToLayers");fields_.addRow(split);
+            split->setToolTip(compositor::ui::localized("Create hidden grayscale layers from the original Red, Green, Blue and Alpha channels."));
             connect(split,&QPushButton::clicked,&dialog_,[this,split]{
                 if(closed_||committing_||splitLayers_)return;
                 if(original_.deep&&original_.deep->valid()&&!original_.deep->isHdr()){
-                    QMessageBox confirmation(QMessageBox::Question,"Create 8-Bit Channels","Create 8-bit channel layers from this 16-bit source? The source keeps its 16-bit pixels.",QMessageBox::Ok|QMessageBox::Cancel,&dialog_);
+                    QMessageBox confirmation(QMessageBox::Question,compositor::ui::localized("Create 8-Bit Channels"),compositor::ui::localized("Create 8-bit channel layers from this 16-bit source? The source keeps its 16-bit pixels."),QMessageBox::Ok|QMessageBox::Cancel,&dialog_);
                     confirmation.setProperty("studioChrome",true);confirmation.setDefaultButton(QMessageBox::Cancel);
                     if(confirmation.exec()!=QMessageBox::Ok||closed_)return;
                     // The OK click that closed the 16-bit prompt can also dismiss a
@@ -570,7 +687,7 @@ public:
             auto result=worker_.result();
             if(splitLayers_){
                 if(!result.error.isEmpty()){
-                    if(host_.error)host_.error(result.error);
+                    if(host_.error)host_.error(ui::localized(result.error));
                     dialog_.reject();
                 }else{
                     channels_=std::move(result.channels);
@@ -580,8 +697,8 @@ public:
             }
             if(!result.error.isEmpty()){
                 if(superseded){start();return;}
-                status_.setText(result.error);apply_->setEnabled(false);
-                if(result.full){if(host_.error)host_.error(result.error);committing_=false;dialog_.reject();}
+                status_.setText(ui::localized(result.error));apply_->setEnabled(false);
+                if(result.full){if(host_.error)host_.error(ui::localized(result.error));committing_=false;dialog_.reject();}
                 return;
             }
             if(result.full){committed_=std::move(result.document);dialog_.accept();return;}
@@ -613,7 +730,7 @@ public:
             if(raw_&&canvas&&preview_.isChecked()&&!pendingNavigatorEdge_)canvas->scheduleNavigator();
             if(!result.thumbnail.isNull())thumbnail_.setPixmap(QPixmap::fromImage(result.thumbnail));
             if(current&&!result.viewportError.isEmpty())status_.setText(result.viewportError);
-            else status_.setText(raw_&&result.reduced?"Preview (reduced to fit memory)":"Preview");
+            else status_.setText(ui::localized(raw_&&result.reduced?"Preview (reduced to fit memory)":"Preview"));
             apply_->setEnabled(!autoBalancePending());
             if(superseded||result.canRefine)start();
             else if(raw_)deferRawViewport();
@@ -625,7 +742,7 @@ public:
                 auto rendered=raw_->rendered();
                 if(rendered.isIdentity()){if(rememberRaw_)rememberRaw_(rendered);dialog_.reject();return;}
                 if(original_.deep&&original_.deep->valid()&&!original_.deep->isHdr()&&filters::cameraRawNeedsEightBit(rendered)){
-                    QMessageBox confirmation(QMessageBox::Question,"Convert to 8-Bit","Mixer, color grading, effects, detail and optics run in 8-bit. Convert this 16-bit layer to 8-bit before applying? Cancel leaves the document unchanged.",QMessageBox::Ok|QMessageBox::Cancel,&dialog_);
+                    QMessageBox confirmation(QMessageBox::Question,compositor::ui::localized("Convert to 8-Bit"),compositor::ui::localized("Mixer, color grading, effects, detail and optics run in 8-bit. Convert this 16-bit layer to 8-bit before applying? Cancel leaves the document unchanged."),QMessageBox::Ok|QMessageBox::Cancel,&dialog_);
                     confirmation.setProperty("studioChrome",true);confirmation.setDefaultButton(QMessageBox::Cancel);
                     if(confirmation.exec()!=QMessageBox::Ok||closed_)return;
                     request_.deepSource.reset();
@@ -634,6 +751,8 @@ public:
             }else if(request_.kind==filters::Kind::LensCorrection&&request_.settings.distortion==0){dialog_.reject();return;}
             else if(request_.kind==filters::Kind::LensEffects&&request_.settings.lens.isIdentity()){dialog_.reject();return;}
             else if(request_.kind==filters::Kind::RgbSplit&&request_.settings.rgbSplitDistance==0&&request_.settings.rgbSplitBlur==0){dialog_.reject();return;}
+            else if(filters::isLighting(request_)&&filters::lightingIsIdentity(request_)){dialog_.reject();return;}
+            if(filters::isLighting(request_)&&host_.closeColor)host_.closeColor(true);
             if(host_.valid&&!host_.valid()){committing_=false;cancel();return;}
             if(!raw_&&remember_)remember_(request_.settings.normalized());committing_=true;apply_->setEnabled(false);buttons_.button(QDialogButtonBox::Cancel)->setEnabled(false);
             for(auto* control:dialog_.findChildren<QDoubleSpinBox*>())control->setEnabled(false);
@@ -673,6 +792,9 @@ public:
     bool committing()const override{return committing_||splitLayers_;}
     void cancel()override{if(!closed_&&!committing_)dialog_.reject();}
     bool samplePress(Point point,double,Qt::KeyboardModifiers)override{
+        if(request_.kind==filters::Kind::VolumetricLight&&!closed_&&!committing_&&!splitLayers_){
+            volumeDragging_=true;request_.settings.volume.center=point;syncGuideOverlay();change();return true;
+        }
         if(request_.kind==filters::Kind::ProgressiveBlur&&!closed_&&!committing_){
             progressiveDragging_=true;request_.settings.progressiveStart=point;request_.settings.progressiveEnd=point;syncGuideOverlay();change();return true;
         }
@@ -688,6 +810,7 @@ public:
         return true;
     }
     bool sampleMove(Point point,double,Qt::KeyboardModifiers,bool finish)override{
+        if(volumeDragging_){request_.settings.volume.center=point;syncGuideOverlay();change();if(finish){volumeDragging_=false;dialog_.activateWindow();}return true;}
         if(progressiveDragging_){request_.settings.progressiveEnd=point;syncGuideOverlay();change();if(finish){progressiveDragging_=false;dialog_.activateWindow();}return true;}
         if(rgbDragging_){request_.settings.rgbSplitCenter=point;syncGuideOverlay();change();if(finish){rgbDragging_=false;dialog_.activateWindow();}return true;}
         if(dragKind_==ui::CameraRawPanel::Tool::None)return false;
@@ -731,7 +854,7 @@ void MainWindow::runFilter(int kindIndex,bool repeating){
     if(layer->deep&&layer->deep->isHdr()&&!filters::supportsHdr(kind))throw std::runtime_error("Use Layer > Convert HDR to 16-Bit before this spatial filter");
     const bool convert=layer->deep&&layer->deep->valid()&&!layer->deep->isHdr()&&(kind==filters::Kind::LensCorrection||kind==filters::Kind::ContentAwareFill);
     if(convert){
-        QMessageBox confirmation(QMessageBox::Question,"Convert to 8-Bit","This filter uses an 8-bit kernel. Convert this 16-bit layer to 8-bit first? This conversion can be undone.",QMessageBox::Ok|QMessageBox::Cancel,this);
+        QMessageBox confirmation(QMessageBox::Question,compositor::ui::localized("Convert to 8-Bit"),compositor::ui::localized("This filter uses an 8-bit kernel. Convert this 16-bit layer to 8-bit first? This conversion can be undone."),QMessageBox::Ok|QMessageBox::Cancel,this);
         confirmation.setProperty("studioChrome",true);confirmation.setDefaultButton(QMessageBox::Cancel);
         if(confirmation.exec()!=QMessageBox::Ok)return;
     }
@@ -740,6 +863,7 @@ void MainWindow::runFilter(int kindIndex,bool repeating){
     if(convert)request.deepSource.reset();
     if(kind==filters::Kind::ProgressiveBlur&&!repeating){request.settings.progressiveStart=request.transform.fromUnit({.5,0});request.settings.progressiveEnd=request.transform.fromUnit({.5,1});}
     if(kind==filters::Kind::RgbSplit&&!repeating){request.settings.rgbSplitCenter=request.transform.fromUnit({.5,.5});request.settings.rgbSplitReach=std::max(1.,std::hypot(request.transform.width,request.transform.height)/2);}
+    if(kind==filters::Kind::VolumetricLight&&!repeating)request.settings.volume.center.reset();
     if(repeating){
         if(ui::LastFilterJob::find(this,p))return;
         const auto action=names[kindIndex].toStdString();

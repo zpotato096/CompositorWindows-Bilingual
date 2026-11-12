@@ -1,5 +1,17 @@
 # Using Compositor on Windows
 
+Choose **Help > Language** to select English or 简体中文. Save any open work before closing the application. The new language is applied when Compositor starts again. On first launch, the Simplified Chinese setting follows the Windows system locale.
+
+**Filters > Sharpen** and **Filters > Reduce Noise** apply the settings to the selected image layer. To keep the settings editable, use **Image > Adjustments > New Adjustment Layer** and select either effect. The Windows sharpening implementation uses an unsharp mask and the noise reduction uses the Camera Raw detail kernel. Pixel matching against the Mac renderer has not been established.
+
+**Filters > Rim Light** uses the foreground outline to light the subject's edges. Add up to three lights and set each light's direction, width, strength, edge choke, and color. **Filters > Volumetric Light** uses the local DepthMini model. Click or drag on the canvas to position the light. **Extract Depth** inserts an editable grayscale layer, with nearer pixels in white. The Windows render uses CPU kernels and BiRefNet foreground segmentation. This can give different outlines and lighting from the Mac renderer.
+
+An open `.comp` project reloads after a complete external change. If the tab has unsaved changes, choose whether to reload the disk version or keep the local edit. The current tab, viewport, and valid layer selection are retained.
+
+Use **File > Save Mac-Compatible Copy** to write a separate v21 project for macOS 1.6.6. It keeps editable GIF frames and supported adjustment layers. The Mac format has no place to store the Windows project's attached CMYK proof profile, so this command is unavailable for that document until the profile is removed. Native **Save Project** uses the Windows format and keeps the profile. The compatibility copy has been implemented against the Mac source schema and still needs testing in the actual Mac application.
+
+To write individual images, select one or more layers and choose **Layer > Export Layers as PNGs** or the corresponding item in the layer list's context menu. The output trims transparent space while retaining the selected layer's appearance, folder opacity, and masks. The portable download includes the Qt WebP codec for opening `.webp` files.
+
 This Windows 11 x64 preview opens and edits layered images locally. It is an independent port of Compositor 1.0.4 by Robbie Tilton, based on upstream commit `a19db9011282399785dc18efcfded904627bdcc2`. See the release notes for supported workflows and measured limitations.
 
 ## Start a project

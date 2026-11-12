@@ -1,5 +1,25 @@
 # Compositor for Windows
 
+## Windows 11 中英双语迁移预览版 2
+
+这是基于 CompositorWindows 1.5.9 的独立预览构建，参考 macOS Compositor 1.6.6。原作者和 Windows 迁移项目见下方致谢。
+
+从本仓库的 Releases 页面获取便携 ZIP，完整解压后运行 `Compositor.exe`。在「帮助 → 语言」选择简体中文或 English，重启后生效。
+
+新版包含锐化、降噪、轮廓光、体积光、深度图层、WebP 导入和单独导出图层 PNG。打开的 `.comp` 支持外部修改刷新。「文件 → 保存 Mac 兼容副本」会写出一个独立的兼容工程。
+
+程序已完成 Windows x64 编译。测试主机的应用控制拦截了未签名的最终程序和回归测试。macOS 实机双向工程交换和光效一致性仍待验证。构建步骤见[源码包说明](docs/source-package.md)。
+
+## Windows 11 x64 bilingual preview 2
+
+This continuation of CompositorWindows 1.5.9 incorporates workflows from macOS Compositor 1.6.6. Download the portable ZIP from this repository's Releases page. Extract the full folder, run `Compositor.exe`, and use **Help → Language** to select English or Simplified Chinese. Restart to apply the setting.
+
+The final x64 build compiled successfully. Application control on the test host blocked the unsigned executable and the final regression suite. Mac project exchange and rendering parity still require testing with the original macOS app.
+
+## Upstream Windows project
+
+The upstream overview below describes the base Windows project. Its release links point to the upstream distribution.
+
 A picture is a stack of decisions. Where the subject sits. What stays sharp. What disappears into the background.
 
 Compositor is the image editor [Robbie Tilton](https://robbietilton.com/compositor) built for the Mac. This is the Windows 11 version of that editor: layers, masks, selections, paint, adjustments, filters, and background removal that runs on your machine.

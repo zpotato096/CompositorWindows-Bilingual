@@ -57,6 +57,7 @@ public:
         std::function<void(layers::EditResult,bool)> commit;
         std::function<void(const std::string&,bool)> collapse;
         std::function<void(int)> layerCommand,maskCommand;
+        std::function<void()> exportPngs;
         std::function<void(const std::string&,bool,Qt::KeyboardModifiers)> loadSelection;
         std::function<void(const QString&)> error;
         std::function<bool()> canEdit;

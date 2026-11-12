@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "MainWindow.h"
 #include <QSettings>
 #include <QSignalBlocker>
@@ -47,7 +48,7 @@ void number(QObject* root,const char* objectName,const char* accessibleName,doub
 }
 void check(QObject* root,const char* objectName,const char* toolbar,const char* label,bool value) {
     auto* item=*objectName?root->findChild<QCheckBox*>(objectName):nullptr;
-    if(!item){auto* scope=root->findChild<QToolBar*>(toolbar);if(scope)for(auto* candidate:scope->findChildren<QCheckBox*>())if(candidate->text()==label){item=candidate;break;}}
+    if(!item){auto* scope=root->findChild<QToolBar*>(toolbar);if(scope)for(auto* candidate:scope->findChildren<QCheckBox*>())if(candidate->text()==ui::localized(label)){item=candidate;break;}}
     if(item){const QSignalBlocker blocker(item);item->setChecked(value);}
 }
 }
@@ -101,7 +102,7 @@ void MainWindow::restoreToolState(const EditorProject& project) {
     check(this,"transformAutoSelect","transformOptions","Auto-select layer",autoSelectLayers_);
     check(this,"transformShowControls","transformOptions","Show controls",transformControls_);
     check(this,"transformSnapping","transformOptions","Snap to edges and centers",snapPolicy_.enabled);
-    for(auto* item:findChildren<QAction*>())if(item->objectName()=="pixelGrid"||item->text()=="Pixel Grid"){const QSignalBlocker blocker(item);item->setChecked(state.showPixelGrid);}
+    for(auto* item:findChildren<QAction*>())if(item->objectName()=="pixelGrid"||item->property("commandId").toString()=="view.pixel_grid"){const QSignalBlocker blocker(item);item->setChecked(state.showPixelGrid);}
     // These existing refreshers block signals and read the newly selected project
     // for clone source/alignment and layer eligibility.
     refreshBrushControls();refreshRetouchControls();refreshSnapControls();

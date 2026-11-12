@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "ImportActions.h"
 #include "imaging/wic_codec.h"
 #include "imaging/heif_codec.h"
@@ -13,10 +14,14 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QMessageBox>
+#include <QBuffer>
 #include <QFile>
 #include <QFileInfo>
+#include <QColorSpace>
+#include <QImageReader>
 #include <QFutureWatcher>
 #include <QTimer>
+#include <QtEndian>
 #include <QtConcurrent/QtConcurrentRun>
 #include <cmath>
 #include <deque>
@@ -32,6 +37,53 @@ imaging::DecodedImage decodeImportImage(const std::filesystem::path& path,const 
         decoded.metadata.decoder=extension==".exr"?"OpenEXR":"Radiance RGBE";decoded.deep=std::move(deep);return decoded;
     }
     if(extension==".svg")return imaging::rasterizeSvg(path,options);
+    if(extension==".webp"){
+        imaging::checkCancelled(options);
+        QFile file(QString::fromStdWString(path.wstring()));
+        if(!file.open(QIODevice::ReadOnly))throw std::runtime_error("Cannot open image");
+        if(file.size()<0||uint64_t(file.size())>options.maxWorkingBytes)
+            throw std::runtime_error("WebP exceeds the import memory budget");
+        QBuffer normalized;
+        QIODevice* input=&file;
+        // Qt 6.8 reads a fixed-size header, longer than some valid lossless WebP files.
+        if(file.size()>=20&&file.size()<64&&(file.size()%2)==0){
+            auto data=file.peek(file.size());
+            if(data.size()==file.size()&&data.startsWith("RIFF")&&data.mid(8,4)=="WEBP"&&
+               qFromLittleEndian<quint32>(data.constData()+4)==quint32(data.size()-8)){
+                do{data.append("JUNK\0\0\0\0",8);}while(data.size()<64);
+                qToLittleEndian<quint32>(quint32(data.size()-8),data.data()+4);
+                normalized.setData(data);
+                normalized.open(QIODevice::ReadOnly);
+                input=&normalized;
+            }
+        }
+        QImageReader reader(input,"webp");
+        reader.setAutoTransform(options.applyExifOrientation);
+        const auto extent=reader.size();
+        if(!extent.isValid())throw std::runtime_error("Cannot read WebP image");
+        const auto bytes=imaging::checkedBytes(uint32_t(extent.width()),uint32_t(extent.height()),4,options);
+        if(bytes>(options.maxWorkingBytes-uint64_t(file.size()))/3)
+            throw std::runtime_error("WebP exceeds the import memory budget");
+        auto decoded=reader.read();
+        if(decoded.isNull())throw std::runtime_error("Cannot decode WebP image");
+        const QColorSpace srgb(QColorSpace::SRgb);
+        auto profile=imaging::ProfileStatus::AssumedSrgbNoProfile;
+        if(decoded.colorSpace().isValid()){
+            if(decoded.colorSpace()!=srgb){decoded.convertToColorSpace(srgb);profile=imaging::ProfileStatus::ConvertedEmbeddedProfile;}
+            else profile=imaging::ProfileStatus::DeclaredSrgb;
+        }
+        decoded.convertTo(QImage::Format_RGBA8888_Premultiplied);
+        const auto width=uint32_t(decoded.width()),height=uint32_t(decoded.height());
+        const auto count=imaging::checkedBytes(width,height,4,options);
+        const auto stride=std::size_t(width)*4;
+        imaging::DecodedImage result;result.image={width,height,stride,std::vector<uint8_t>(count)};
+        result.metadata.profileStatus=profile;result.metadata.decoder="WebP";
+        for(uint32_t y=0;y<height;++y){
+            imaging::checkCancelled(options);
+            std::copy_n(decoded.constScanLine(int(y)),stride,result.image.pixels.data()+stride*y);
+        }
+        return result;
+    }
     if(imaging::isRawFileExtension(path))return imaging::decodeRaw(path,options);
     QFile file(QString::fromStdWString(path.wstring()));
     if(!file.open(QIODevice::ReadOnly))throw std::runtime_error("Cannot open image");
@@ -94,10 +146,10 @@ public:
         : QDialog(parent), cancelled_(std::move(cancelled)) {
         setProperty("studioChrome", true);
         setObjectName("pdfImportPreflight");
-        setWindowTitle("Import PDF");
+        setWindowTitle(compositor::ui::localized("Import PDF"));
         setWindowModality(Qt::ApplicationModal);
         auto* layout = new QVBoxLayout(this);
-        label_ = new QLabel("Reading PDF pages…", this);
+        label_ = new QLabel(compositor::ui::localized("Reading PDF pages…"), this);
         layout->addWidget(label_);
         auto* bar = new QProgressBar(this);
         bar->setRange(0, 0);
@@ -109,7 +161,7 @@ public:
 
     void reject() override {
         cancelled_->store(true);
-        label_->setText("Cancelling PDF import…");
+        label_->setText(compositor::ui::localized("Cancelling PDF import…"));
         buttons_->setEnabled(false);
     }
 
@@ -339,7 +391,10 @@ ImportResult prepareImportBatch(ImportState state,const ImportBatch& batch,const
             if(!layer.parentId.empty())result.expandedGroups.push_back(layer.parentId);
             result.after.active=layer.id;if(batch.openCameraRaw&&*batch.openCameraRaw==path)result.cameraRawLayer=layer.id;
             if(decoded.deep&&imaging::isRawFileExtension(path))result.importedDeepRaw=true;
-            document.layers.push_back(std::move(layer));++result.imported;
+            document.layers.push_back(std::move(layer));
+            if (!result.before.document && result.imported == 0 && !batch.lifetime)
+                result.firstSourcePath = path;
+            ++result.imported;
             workingBytes -= retained;
         }catch(const std::exception& error){
             if(cancelled()){result.cancelled=true;break;}
@@ -347,7 +402,7 @@ ImportResult prepareImportBatch(ImportState state,const ImportBatch& batch,const
         }
     }
     if(cancelled())result.cancelled=true;
-    if(result.cancelled){result.after=result.before;result.imported=0;result.cameraRawLayer.clear();result.expandedGroups.clear();result.errors.clear();}
+    if(result.cancelled){result.after=result.before;result.imported=0;result.cameraRawLayer.clear();result.expandedGroups.clear();result.errors.clear();result.firstSourcePath.clear();}
     if(result.after.document)validateDocument(*result.after.document);
     return result;
 }

@@ -1,6 +1,7 @@
 // Command contracts from a19db9011282399785dc18efcfded904627bdcc2.
 // Source predicates deliberately remain separate from Qt focus/modal policy.
 #include "CommandRegistry.h"
+#include "InterfaceLanguage.h"
 #include <QAction>
 #include <QApplication>
 #include <QAbstractSpinBox>
@@ -97,6 +98,8 @@ const std::vector<CommandSpec>& commandCatalog(){
         add("file.export","File","Export Image…","Ctrl+Shift+E",C::Document,G::DocumentOperation,P::ProjectOperation,"Compositor/CompositorApp.swift:68");
         add("file.save","File","Save Project","Ctrl+S",C::Document,G::DocumentOperation,P::ProjectOperation,"Compositor/CompositorApp.swift:62");
         add("file.save_as","File","Save Project As…","Ctrl+Shift+S",C::Document,G::DocumentOperation,P::ProjectOperation,"Compositor/CompositorApp.swift:64");
+        add("layer.export_png","Layer","Export Layers as PNGs…","",C::Layer,G::DocumentOperation,P::ProjectOperation,"Compositor/IO/ProjectController.swift v1.6.6");
+        add("file.save_mac_copy","File","Save Mac-Compatible Copy…","",C::Document,G::DocumentOperation,P::ProjectOperation,"Compositor/IO/ProjectStore.swift v1.6.6");
         add("file.close","File","Close Project","Ctrl+W",C::Workspace,G::WorkspaceSwitch,P::ProjectOperation,"Compositor/Document/ProjectWorkspace.swift:107");
         add("app.exit","File","Exit","Alt+F4",C::Application,G::WorkspaceSwitch,P::None,"Compositor/IO/CompositorApplicationDelegate.swift:39");
         add("app.about","Help","About Compositor","",C::Application,G::Always,P::None,"Native Windows application information");
@@ -184,11 +187,13 @@ const std::vector<CommandSpec>& commandCatalog(){
         add("adjust.new.vignette","New Adjustment Layer","Vignette…","",C::Adjustment,G::NewAdjustment,P::FinishAppearance,"Compositor/Document/LayerAdjustment.swift");
         add("adjust.new.tonal_contrast","New Adjustment Layer","Tonal Contrast…","",C::Adjustment,G::NewAdjustment,P::FinishAppearance,"Compositor/Document/LayerAdjustment.swift");
         add("adjust.new.lens_effects","New Adjustment Layer","Lens Effects…","",C::Adjustment,G::NewAdjustment,P::FinishAppearance,"Compositor/Document/LayerAdjustment.swift");
+        add("adjust.new.sharpen","New Adjustment Layer","Sharpen…","",C::Adjustment,G::NewAdjustment,P::FinishAppearance,"Compositor/Document/LayerAdjustment.swift");
+        add("adjust.new.reduce_noise","New Adjustment Layer","Reduce Noise…","",C::Adjustment,G::NewAdjustment,P::FinishAppearance,"Compositor/Document/LayerAdjustment.swift");
         add("adjust.edit","Adjustments","Edit Adjustment Layer…","",C::Adjustment,G::EditAdjustment,P::FinishAppearance,"Compositor/CompositorApp.swift:222");
         add("filter.last","Filters","Last Filter","Ctrl+Alt+F",C::Adjustment,G::RepeatLastFilter,P::CommitTransformAndGradient,"Compositor/Document/Filters.swift:541");
-        const char*filters[]{"Gaussian Blur…","Motion Blur…","Add Noise…","Lens Correction…","Content-Aware Fill…","Vignette…","Bloom…","Tonal Contrast…","Dither…","Scanlines…","Camera Raw Filter…","Remove Background…","Progressive Blur…","RGB Split…","Lens Effects\u2026"};
-        const char*filterIds[]{"filter.gaussian","filter.motion","filter.noise","filter.lens","filter.content_aware","filter.vignette","filter.bloom","filter.tonal","filter.dither","filter.scanlines","filter.camera_raw","filter.subject","filter.progressive","filter.rgb_split","filter.lens_effects"};
-        for(int i=0;i<15;++i)add(filterIds[i],"Filters",filters[i],i==4?"Shift+Delete":"",C::Adjustment,i==4?G::ContentAwareFill:G::Adjust,P::CommitTransformAndGradient,"Compositor/Document/Filters.swift:299");
+        const char*filters[]{"Gaussian Blur…","Motion Blur…","Add Noise…","Lens Correction…","Content-Aware Fill…","Vignette…","Bloom…","Tonal Contrast…","Dither…","Scanlines…","Camera Raw Filter…","Remove Background…","Progressive Blur…","RGB Split…","Lens Effects\u2026","Sharpen…","Reduce Noise…","Rim Light…","Volumetric Light…"};
+        const char*filterIds[]{"filter.gaussian","filter.motion","filter.noise","filter.lens","filter.content_aware","filter.vignette","filter.bloom","filter.tonal","filter.dither","filter.scanlines","filter.camera_raw","filter.subject","filter.progressive","filter.rgb_split","filter.lens_effects","filter.sharpen","filter.reduce_noise","filter.rim_light","filter.volumetric_light"};
+        for(int i=0;i<std::size(filters);++i)add(filterIds[i],"Filters",filters[i],i==4?"Shift+Delete":"",C::Adjustment,i==4?G::ContentAwareFill:G::Adjust,P::CommitTransformAndGradient,"Compositor/Document/Filters.swift:299");
         const char*toolLabels[]{"Move (V)","Hand (H)","Marquee (M)","Lasso (L)","Polygon","Wand (W)","Brush (B)","Eraser (E)","Clone (S)","Heal (J)","Retouch (R)","Gradient (G)","Shape (U)","Crop (C)","Eyedropper (I)","Zoom (Z)","Type (T)"};
         const char*toolIds[]{"move","hand","marquee","lasso","polygon","wand","brush","eraser","clone","heal","retouch","gradient","shape","crop","eyedropper","zoom","type"};
         const char*toolKeys[]{"V","H","M","L","","W","B","E","S","J","R","G","U","C","I","Z","T"};
@@ -279,6 +284,7 @@ CommandRegistry::~CommandRegistry(){if(qApp)qApp->removeEventFilter(this);}
 void CommandRegistry::bind(QAction*action,const CommandSpec&spec,std::function<void()>invoke,Enabled extra){
     if(!action||spec.id.isEmpty()||!invoke)throw std::invalid_argument("Invalid command binding");
     if(std::any_of(entries_.begin(),entries_.end(),[&](const Entry&e){return e.action==action;}))throw std::invalid_argument("Action already registered");
+    action->setText(localized(action->text()));
     action->setProperty("commandId",spec.id);action->setProperty("commandSource",spec.source);if(action->objectName().isEmpty())action->setObjectName("command."+spec.id);
     if(!spec.windowsShortcut.isEmpty())action->setShortcut(QKeySequence(spec.windowsShortcut));
     if(spec.id=="edit.redo")action->setShortcuts({QKeySequence("Ctrl+Shift+Z"),QKeySequence("Ctrl+Y")});
@@ -320,7 +326,7 @@ std::vector<CommandListItem> CommandRegistry::listCommands()const{
     std::set<QString> seen;
     for(const auto&e:entries_){
         if(!e.action||!seen.insert(e.spec.id).second)continue;
-        result.push_back({e.spec.id,e.spec.menu,hinted(normalized(e.spec.label),defaults_.at(e.spec.id),shortcuts_.at(e.spec.id)),displayShortcut(*e.action),e.action->isEnabled(),e.action->isChecked()});
+        result.push_back({e.spec.id,localized(e.spec.menu),hinted(normalized(localized(e.spec.label)),defaults_.at(e.spec.id),shortcuts_.at(e.spec.id)),displayShortcut(*e.action),e.action->isEnabled(),e.action->isChecked()});
     }
     return result;
 }

@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "MainWindow.h"
 #include "StaWorker.h"
 #include "imaging/cmyk.h"
@@ -67,13 +68,13 @@ bool MainWindow::reviewCmykImports(const QStringList& paths,ui::RawSettings& set
                 message.setText(QFileInfo(path).fileName()+" has no embedded profile.");
                 message.setInformativeText("Choose the profile used to create this image.");
                 if(message.exec()!=QMessageBox::Open)return false;
-                try{const auto chosen=chooseNativeCmykProfilePath();if(chosen.isEmpty())return false;fallback=imaging::readCmykProfile(std::filesystem::path(chosen.toStdWString()));}catch(const std::exception& error){QMessageBox::critical(this,"CMYK profile",error.what());return false;}
+                try{const auto chosen=chooseNativeCmykProfilePath();if(chosen.isEmpty())return false;fallback=imaging::readCmykProfile(std::filesystem::path(chosen.toStdWString()));}catch(const std::exception& error){QMessageBox::critical(this,compositor::ui::localized("CMYK profile"),error.what());return false;}
             }
         }
     }return true;
 }
 void MainWindow::setupCmykActions(QMenu* view){
-    auto* menu=view->addMenu("CMYK");
+    auto* menu=compositor::ui::localizedMenu(view, "CMYK");
     auto* proof=action(menu,"Proof Colors",{},[this]{auto* p=current();if(!p||!p->document)return;if(!p->document->cmykProfile){chooseCmykProfile();if(!p->document->cmykProfile){refreshCmykActions();return;}}p->proofColors=!p->proofColors;refreshCmykActions();});
     proof->setObjectName("viewCmykProof");proof->setCheckable(true);
     auto* profile=action(menu,"Load Profile…",{},[this]{chooseCmykProfile();});profile->setObjectName("viewCmykProfile");
@@ -82,7 +83,7 @@ void MainWindow::setupCmykActions(QMenu* view){
 void MainWindow::chooseCmykProfile(){
     auto* p=current();if(!p||!p->document||p->importing||p->projectBusy)return;
     const auto file=chooseNativeCmykProfilePath();if(file.isEmpty())return;
-    CmykProfilePtr profile;try{profile=imaging::readCmykProfile(std::filesystem::path(file.toStdWString()));}catch(const std::exception& error){QMessageBox::critical(this,"CMYK profile",error.what());return;}
+    CmykProfilePtr profile;try{profile=imaging::readCmykProfile(std::filesystem::path(file.toStdWString()));}catch(const std::exception& error){QMessageBox::critical(this,compositor::ui::localized("CMYK profile"),error.what());return;}
     if(!profile)return;
     if(!p->document->cmykProfile||p->document->cmykProfile->sha256!=profile->sha256)
         edit("CMYK Profile",[profile](Document& document){document.cmykProfile=profile;},false);
@@ -92,7 +93,7 @@ void MainWindow::chooseCmykProfile(){
 void MainWindow::refreshCmykActions(){
     auto* p=current();const auto profile=p&&p->document?p->document->cmykProfile:nullptr;
     if(auto* action=findChild<QAction*>("viewCmykProof")){QSignalBlocker block(action);action->setChecked(p&&p->proofColors&&bool(profile));}
-    if(auto* action=findChild<QAction*>("viewCmykProfileName"))action->setText("Profile: "+(profile?QString::fromStdString(profile->name):QStringLiteral("none")));
+    if(auto* action=findChild<QAction*>("viewCmykProfileName"))action->setText(compositor::ui::localized("Profile: ")+(profile?QString::fromStdString(profile->name):QStringLiteral("none")));
     if(p&&p->canvas)p->canvas->setCmykProof(profile,p->proofColors&&bool(profile));
 }
 }

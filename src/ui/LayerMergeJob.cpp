@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "LayerMergeJob.h"
 #include <QFutureWatcher>
 #include <QPointer>
@@ -14,7 +15,7 @@ struct LayerMergeJob::Impl {
     QFutureWatcher<Result> watcher;
     QProgressDialog progress;
     explicit Impl(QWidget* parent):progress("Merging layers…","Cancel",0,0,parent){
-        progress.setObjectName("mergeProgress");progress.setWindowTitle("Merge Layers");
+        progress.setObjectName("mergeProgress");progress.setWindowTitle(compositor::ui::localized("Merge Layers"));
         progress.setWindowModality(Qt::NonModal);progress.setMinimumDuration(0);
         progress.setAutoClose(false);progress.setAutoReset(false);
     }

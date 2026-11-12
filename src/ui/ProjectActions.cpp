@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "MainWindow.h"
 #include <algorithm>
 #include <cmath>
@@ -167,7 +168,7 @@ void MainWindow::initializeProject(EditorProject&project){
         if(!button->defaultAction())connect(button,&QToolButton::clicked,this,[this]{newDialog();});
         button->setToolButtonStyle(Qt::ToolButtonIconOnly);button->setIcon(ui::editorIcon(ui::EditorIcon::Plus));
         if(button->defaultAction())connect(button->defaultAction(),&QAction::changed,button,[button]{button->setIcon(ui::editorIcon(ui::EditorIcon::Plus));});
-        button->setText("+");button->setAccessibleName("New canvas; drop into a new project");button->setToolTip("New canvas · Drop images or layers here for new projects");tabs_->setCornerWidget(corner,Qt::TopRightCorner);
+        button->setText("+");button->setAccessibleName(compositor::ui::localized("New canvas; drop into a new project"));button->setToolTip(compositor::ui::localized("New canvas · Drop images or layers here for new projects"));tabs_->setCornerWidget(corner,Qt::TopRightCorner);
     }
     project.canvas=new NativeCanvas(warp_);
     project.canvas->showPixelGrid=true;
@@ -228,9 +229,9 @@ EditorProject& MainWindow::addEmptyProject(bool reuseEmpty){
     auto*row=new QHBoxLayout;row->addStretch();auto*panel=new QWidget;panel->setObjectName("newCanvasCard");panel->setMaximumWidth(440);
     panel->setStyleSheet("QWidget#newCanvasCard { background: #27292e; border: 1px solid #3b3e46; border-radius: 14px; } QLabel { background: transparent; } QLabel#newCanvasHeading { font-size: 28px; font-weight: 500; margin-bottom: 14px; }");
     auto*form=new QFormLayout(panel);form->setContentsMargins(28,28,28,26);form->setVerticalSpacing(14);form->setHorizontalSpacing(18);
-    auto*heading=new QLabel("New canvas");heading->setObjectName("newCanvasHeading");QFont font=heading->font();font.setPointSize(20);heading->setFont(font);form->addRow(heading);
+    auto*heading=new QLabel(compositor::ui::localized("New canvas"));heading->setObjectName("newCanvasHeading");QFont font=heading->font();font.setPointSize(20);heading->setFont(font);form->addRow(heading);
     auto draft=std::make_shared<NewCanvasDraft>();
-    auto*preset=new QComboBox;preset->setObjectName("newCanvasPreset");preset->setAccessibleName("Canvas preset");
+    auto*preset=new QComboBox;preset->setObjectName("newCanvasPreset");preset->setAccessibleName(compositor::ui::localized("Canvas preset"));
     preset->addItem("Custom",-1);
     std::string_view category;int defaultPreset=0;
     for(int entry=0;entry<int(std::size(newCanvasPresets));++entry){
@@ -240,16 +241,16 @@ EditorProject& MainWindow::addEmptyProject(bool reuseEmpty){
         if(item.unit==editing::PrintUnit::Pixels&&item.width==1920&&item.height==1080)defaultPreset=preset->count()-1;
     }
     preset->setCurrentIndex(defaultPreset);
-    auto*unit=new QComboBox;unit->setObjectName("newCanvasUnit");unit->setAccessibleName("Canvas units");
+    auto*unit=new QComboBox;unit->setObjectName("newCanvasUnit");unit->setAccessibleName(compositor::ui::localized("Canvas units"));
     unit->addItem("Pixels",int(editing::PrintUnit::Pixels));unit->addItem("Inches",int(editing::PrintUnit::Inches));unit->addItem("Centimeters",int(editing::PrintUnit::Centimeters));unit->addItem("Millimeters",int(editing::PrintUnit::Millimeters));
-    auto*resolution=new QSpinBox;resolution->setObjectName("newCanvasResolution");resolution->setAccessibleName("Resolution");resolution->setRange(1,9600);resolution->setValue(72);resolution->setSuffix(" DPI");
-    auto*width=new QDoubleSpinBox;auto*height=new QDoubleSpinBox;width->setObjectName("newCanvasWidth");height->setObjectName("newCanvasHeight");width->setAccessibleName("Width");height->setAccessibleName("Height");
-    auto*background=new QComboBox;background->setObjectName("newCanvasBackground");background->setAccessibleName("Background");
+    auto*resolution=new QSpinBox;resolution->setObjectName("newCanvasResolution");resolution->setAccessibleName(compositor::ui::localized("Resolution"));resolution->setRange(1,9600);resolution->setValue(72);resolution->setSuffix(" DPI");
+    auto*width=new QDoubleSpinBox;auto*height=new QDoubleSpinBox;width->setObjectName("newCanvasWidth");height->setObjectName("newCanvasHeight");width->setAccessibleName(compositor::ui::localized("Width"));height->setAccessibleName(compositor::ui::localized("Height"));
+    auto*background=new QComboBox;background->setObjectName("newCanvasBackground");background->setAccessibleName(compositor::ui::localized("Background"));
     background->addItem("Transparent",QColor(Qt::transparent));background->addItem("White",QColor(Qt::white));background->addItem("Black",QColor(Qt::black));
     auto*summary=new QLabel;summary->setObjectName("newCanvasSummary");
     if(!first){const auto image=QApplication::clipboard()->image();if(!image.isNull()&&image.width()<=30000&&image.height()<=30000){draft->width=image.width();draft->height=image.height();preset->setCurrentIndex(0);}}
-    form->addRow("Preset",preset);form->addRow("Units",unit);form->addRow("Width",width);form->addRow("Height",height);form->addRow("Resolution",resolution);form->addRow("Background",background);form->addRow(summary);
-    auto*buttons=new QDialogButtonBox;auto*open=buttons->addButton("Open project",QDialogButtonBox::ActionRole);auto*import=buttons->addButton("Import image",QDialogButtonBox::ActionRole);import->setObjectName("welcomeImportImage");auto*create=buttons->addButton("Create canvas",QDialogButtonBox::AcceptRole);create->setObjectName("createCanvas");create->setDefault(true);form->addRow(buttons);
+    form->addRow(compositor::ui::localized("Preset"),preset);form->addRow(compositor::ui::localized("Units"),unit);form->addRow(compositor::ui::localized("Width"),width);form->addRow(compositor::ui::localized("Height"),height);form->addRow(compositor::ui::localized("Resolution"),resolution);form->addRow(compositor::ui::localized("Background"),background);form->addRow(summary);
+    auto*buttons=new QDialogButtonBox;auto*open=buttons->addButton(compositor::ui::localized("Open project"),QDialogButtonBox::ActionRole);auto*import=buttons->addButton(compositor::ui::localized("Import image"),QDialogButtonBox::ActionRole);import->setObjectName("welcomeImportImage");auto*create=buttons->addButton(compositor::ui::localized("Create canvas"),QDialogButtonBox::AcceptRole);create->setObjectName("createCanvas");create->setDefault(true);form->addRow(buttons);
     connect(open,&QPushButton::clicked,this,[this]{openProjectDialog();});connect(import,&QPushButton::clicked,this,[this]{importWelcomeImage();});
     // Shows the draft in every control. Typed spin text is rewritten only when requested, so a value being typed is not moved under the caret.
     auto syncNewCanvas=[draft,width,height,summary,background,create](bool rewriteSizes){
@@ -260,7 +261,7 @@ EditorProject& MainWindow::addEmptyProject(bool reuseEmpty){
         // A preset shows its own print size while its unit and resolution remain selected, because 2480 px is 209.9733 mm at 300 DPI.
         const bool presetSize=draft->preset>=0&&newCanvasPresets[draft->preset].unit==draft->unit&&newCanvasPresets[draft->preset].dpi==draft->dpi;
         const auto sync=[&](QDoubleSpinBox* box,int pixels,double nominal){const QSignalBlocker blocker(box);box->setDecimals(pixelMode?0:4);box->setRange(shown(1),shown(30000));box->setSuffix(suffix);box->setValue(presetSize?nominal:shown(pixels));};
-        if(rewriteSizes){width->setAccessibleName(QString("Width in %1").arg(unitName));height->setAccessibleName(QString("Height in %1").arg(unitName));sync(width,draft->width,presetSize?newCanvasPresets[draft->preset].width:0);sync(height,draft->height,presetSize?newCanvasPresets[draft->preset].height:0);}
+        if(rewriteSizes){width->setAccessibleName(compositor::ui::localized("Width in %1").arg(unitName));height->setAccessibleName(compositor::ui::localized("Height in %1").arg(unitName));sync(width,draft->width,presetSize?newCanvasPresets[draft->preset].width:0);sync(height,draft->height,presetSize?newCanvasPresets[draft->preset].height:0);}
         const bool solid=background->currentData().value<QColor>().alpha()>0;
         const bool fits=!solid||uint64_t(draft->width)*uint64_t(draft->height)<=solidCanvasPixelBudget;
         create->setEnabled(fits);

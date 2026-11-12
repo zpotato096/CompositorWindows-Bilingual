@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "MainWindow.h"
 #include "EditorIcons.h"
 #include "PaletteDialog.h"
@@ -210,16 +211,16 @@ public:
         layout->setContentsMargins(8,8,8,8);
         search_=new QLineEdit(this);
         search_->setObjectName("textFontSearch");
-        search_->setAccessibleName("Search fonts");
-        search_->setPlaceholderText("Search fonts");
+        search_->setAccessibleName(compositor::ui::localized("Search fonts"));
+        search_->setPlaceholderText(compositor::ui::localized("Search fonts"));
         search_->setClearButtonEnabled(true);
         results_=new QListWidget(this);
         results_->setObjectName("textFontResults");
-        results_->setAccessibleName("Installed font faces");
+        results_->setAccessibleName(compositor::ui::localized("Installed font faces"));
         results_->setFocusPolicy(Qt::NoFocus);
         results_->setMouseTracking(true);
         results_->setUniformItemSizes(true);
-        empty_=new QLabel("No matching fonts",this);
+        empty_=new QLabel(compositor::ui::localized("No matching fonts"),this);
         empty_->setAlignment(Qt::AlignCenter);
         layout->addWidget(search_);
         layout->addWidget(results_,1);
@@ -366,23 +367,23 @@ std::pair<int,int> wordRange(const QString& text,int index){
 }
 void MainWindow::setupTypeControls(){
     auto* bar=addToolBar("Type Options");bar->setObjectName("typeOptions");
-    auto* fonts=new QToolButton;fonts->setObjectName("textFont");fonts->setAccessibleName("Text font");fonts->setFixedWidth(180);
+    auto* fonts=new QToolButton;fonts->setObjectName("textFont");fonts->setAccessibleName(compositor::ui::localized("Text font"));fonts->setFixedWidth(180);
     fonts->setFocusPolicy(Qt::StrongFocus);fonts->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     fonts->setIcon(ui::editorIcon(ui::EditorIcon::ChevronDown));fonts->setIconSize({12,12});
-    auto* styles=new QComboBox;styles->setObjectName("textStyle");styles->setAccessibleName("Text style");styles->setFixedWidth(120);
-    styles->setEditable(true);styles->lineEdit()->setReadOnly(true);styles->lineEdit()->setPlaceholderText("Multiple");
+    auto* styles=new QComboBox;styles->setObjectName("textStyle");styles->setAccessibleName(compositor::ui::localized("Text style"));styles->setFixedWidth(120);
+    styles->setEditable(true);styles->lineEdit()->setReadOnly(true);styles->lineEdit()->setPlaceholderText(compositor::ui::localized("Multiple"));
     openComboOnFieldClick(styles);
     textStyleBox_=styles;
-    auto* size=new ui::PropertyNumber;size->setObjectName("textSize");size->setAccessibleName("Text size");size->setRange(1,1000);size->setDecimals(0);size->setValue(textDefaults_.fontSize);size->setSuffix(" px");
+    auto* size=new ui::PropertyNumber;size->setObjectName("textSize");size->setAccessibleName(compositor::ui::localized("Text size"));size->setRange(1,1000);size->setDecimals(0);size->setValue(textDefaults_.fontSize);size->setSuffix(" px");
     size->releaseFocus=[this]{focusTextCanvas();};
-    auto* color=new QToolButton;color->setObjectName("textColor");color->setAccessibleName("Text color");color->setFixedSize(36,22);
+    auto* color=new QToolButton;color->setObjectName("textColor");color->setAccessibleName(compositor::ui::localized("Text color"));color->setFixedSize(36,22);
     auto* align=new QButtonGroup(bar);align->setObjectName("textAlign");align->setExclusive(true);
     auto addAlign=[&](const char* name,const QString& label,TextAlignment value){auto* button=new QToolButton;button->setObjectName(name);button->setAccessibleName(label);button->setText(label);button->setCheckable(true);button->setAutoRaise(true);align->addButton(button,int(value));bar->addWidget(button);return button;};
-    auto* tracking=new ui::PropertyNumber;tracking->setObjectName("textTracking");tracking->setAccessibleName("Tracking");tracking->setRange(-100,1000);tracking->setDecimals(0);tracking->setValue(0);tracking->releaseFocus=[this]{focusTextCanvas();};
-    auto* leading=new QLineEdit;leading->setObjectName("textLeading");leading->setAccessibleName("Leading");leading->setPlaceholderText("Auto");leading->setFixedWidth(64);
-    auto* applyForeground=new QAction("Apply Text Color",this);applyForeground->setObjectName("textApplyForeground");
-    auto* cancel=bar->addAction("Cancel");cancel->setObjectName("textCancel");
-    auto* done=bar->addAction("Done");done->setObjectName("textDone");
+    auto* tracking=new ui::PropertyNumber;tracking->setObjectName("textTracking");tracking->setAccessibleName(compositor::ui::localized("Tracking"));tracking->setRange(-100,1000);tracking->setDecimals(0);tracking->setValue(0);tracking->releaseFocus=[this]{focusTextCanvas();};
+    auto* leading=new QLineEdit;leading->setObjectName("textLeading");leading->setAccessibleName(compositor::ui::localized("Leading"));leading->setPlaceholderText(compositor::ui::localized("Auto"));leading->setFixedWidth(64);
+    auto* applyForeground=new QAction(compositor::ui::localized("Apply Text Color"),this);applyForeground->setObjectName("textApplyForeground");
+    auto* cancel=bar->addAction(compositor::ui::localized("Cancel"));cancel->setObjectName("textCancel");
+    auto* done=bar->addAction(compositor::ui::localized("Done"));done->setObjectName("textDone");
     bar->addWidget(fonts);bar->addWidget(styles);bar->addWidget(size);bar->addWidget(color);
     addAlign("textAlignLeft","Align left",TextAlignment::Left);addAlign("textAlignCenter","Align center",TextAlignment::Center);addAlign("textAlignRight","Align right",TextAlignment::Right);
     bar->addWidget(tracking);bar->addWidget(leading);bar->addAction(cancel);bar->addAction(done);

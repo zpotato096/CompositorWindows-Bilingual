@@ -1,3 +1,4 @@
+#include "InterfaceLanguage.h"
 #include "MainWindow.h"
 #include "LayerOpacityField.h"
 #include <QHBoxLayout>
@@ -6,7 +7,7 @@
 namespace compositor {
 QWidget* MainWindow::createLayerOpacityControl(){
     auto* control=new QWidget;auto* layout=new QHBoxLayout(control);layout->setContentsMargins(0,0,0,0);layout->setSpacing(4);
-    opacityPercent_=new ui::LayerOpacityField;opacityPercent_->setObjectName("layerOpacityPercent");opacityPercent_->setAccessibleName("Opacity percent");opacityPercent_->setFixedWidth(48);
+    opacityPercent_=new ui::LayerOpacityField;opacityPercent_->setObjectName("layerOpacityPercent");opacityPercent_->setAccessibleName(compositor::ui::localized("Opacity percent"));opacityPercent_->setFixedWidth(48);
     opacityPercent_->target=[this]()->std::optional<ui::LayerOpacityField::Target>{
         auto* project=current();auto* layer=active();
         if(!project||!layer)return {};return ui::LayerOpacityField::Target{project->page,layer->id,layer->opacity};
