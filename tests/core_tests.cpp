@@ -1,0 +1,54 @@
+#include "core/Document.h"
+#include "graphics/PixelAlgorithms.h"
+#include <array>
+#include <cmath>
+#include <iostream>
+#include <stdexcept>
+#include <functional>
+#include <map>
+using namespace compositor;
+static void require(bool c,const char*m){if(!c)throw std::runtime_error(m);}
+int main(int argc,char**argv){std::map<std::string,std::function<void()>> tests;
+tests["transform_fractional_inverse"]=[]{Transform t{.125,-3.75,33,71,47,true,false};Point p{.2,.8};auto q=t.toUnit(t.fromUnit(p));require(std::abs(q.x-p.x)<1e-12&&std::abs(q.y-p.y)<1e-12,"transform round trip");require(t.valid(),"fractional valid");t.width=0;require(!t.valid(),"zero rejected");};
+tests["immutable_tiles"]=[]{auto a=Raster::filled(513,257);Pixel red{128,0,0,128};auto b=a->replacing(255,10,1,1,&red,1);require(a->pixel(255,10)==Pixel{},"original changed");require(b->pixel(255,10)==red,"patch missing");require(a->tiles[0]!=b->tiles[0]&&a->tiles[1]==b->tiles[1],"unchanged tile not shared");auto c=b->replacing(256,10,1,1,&red,1);require(c->pixel(255,10)==red&&c->pixel(256,10)==red,"immediate next patch");};
+tests["premultiplied_contract"]=[]{Pixel bad{255,80,90,30};auto a=Raster::filled(1,1)->replacing(0,0,1,1,&bad,1);require(a->pixel(0,0)==Pixel{30,30,30,30},"RGB alpha clamp");};
+tests["normal_alpha_exact"]=[]{require(blendPixel({0,0,255,255},{128,0,0,128},Blend::Normal)==Pixel{128,0,127,255},"source over");require(blendPixel({20,30,40,80},{},Blend::Normal)==Pixel{20,30,40,80},"transparent unchanged");};
+tests["dodge_burn_alpha"]=[]{auto dodge=blendPixel({64,64,64,255},{64,64,64,128},Blend::ColorDodge);auto burn=blendPixel({192,192,192,255},{64,64,64,128},Blend::ColorBurn);require(dodge.a==255&&dodge.r>=95&&dodge.r<=97,"dodge source alpha");require(burn.a==255&&burn.r>=160&&burn.r<=162,"burn source alpha");};
+tests["dodge_burn_srgb"]=[]{auto dodge=blendPixel({64,64,64,255},{64,64,64,128},Blend::ColorDodge);auto burn=blendPixel({192,192,192,255},{64,64,64,128},Blend::ColorBurn);require(dodge==Pixel{96,96,96,255},"sRGB dodge byte");require(burn==Pixel{160,160,160,255},"sRGB burn byte");auto soft=blendPixel({128,128,128,255},{255,255,255,255},Blend::SoftLight);require(soft.r>128&&soft.r<255,"soft light lifts mid gray");};
+tests["levels_single_unpremultiply"]=[]{std::vector<uint8_t> rgba{128,128,128,128};std::array<float,768> lut{};for(int c=0;c<3;++c)for(int i=0;i<256;++i)lut[size_t(c)*256+i]=i>=200?1.f:0.f;graphics::applyLevels({rgba,1,1,4},lut);require(rgba[0]==128&&rgba[3]==128,"half-alpha white stays white after one unpremultiply");};
+tests["all_blends_alpha"]=[]{for(size_t i=0;i<blendNames.size();++i){auto p=blendPixel({10,80,30,100},{90,10,20,128},Blend(i));require(p.a==178&&p.r<=p.a&&p.g<=p.a&&p.b<=p.a,"blend premultiplied bounds");require(blendPixel({},{30,40,50,90},Blend(i))==Pixel{30,40,50,90},"transparent backdrop");}};
+tests["render_tile_partition"]=[]{Document d;d.width=513;d.height=3;Layer l;l.id=newId();l.transform={-1,0,514,3,0,false,false,Transform::Sampling::Nearest};l.raster=Raster::filled(514,3,{64,32,0,128});d.layers.push_back(l);SoftwareRenderer r;auto full=r.render(d,0,0,513,3);auto left=r.render(d,0,0,256,3);auto right=r.render(d,256,0,257,3);for(int y=0;y<3;++y)for(int x=0;x<513;++x)require(full->pixel(x,y)==(x<256?left->pixel(x,y):right->pixel(x-256,y)),"partition seam");};
+tests["viewport_cancel_retry"]=[]{
+    Document document;document.width=513;document.height=257;
+    Layer layer;layer.id="preview";layer.transform={0,0,513,257};layer.raster=Raster::filled(513,257,{80,60,40,255});
+    document.layers.push_back(layer);
+    CompositeCache cache;
+    int tiles=0;bool cancelled=false;
+    try{cache.renderViewport(document,0,0,513,257,1,64,256,{},[&]{return ++tiles>2;});}
+    catch(const std::runtime_error&){cancelled=true;}
+    require(cancelled&&tiles==3&&cache.viewportRetainedTiles()==0,"cancelled viewport discards partially computed tiles");
+    const auto view=cache.renderViewport(document,0,0,513,257);
+    require(view.raster&&view.raster->rgba()==layer.raster->rgba(),"retry presents the original pixels");
+};
+tests["mask_and_hidden_clip"]=[]{Document d;d.width=2;d.height=1;Layer base;base.id="base";base.visible=false;base.raster=Raster::filled(2,1,{0,0,0,128});base.transform={0,0,2,1};Layer l;l.id="paint";l.raster=Raster::filled(2,1,{255,0,0,255});l.transform={0,0,2,1};l.maskSourceId="base";auto m=std::make_shared<GrayRaster>();m->width=2;m->height=1;m->pixels={255,0};l.mask=Mask{m};d.layers={base,l};auto out=SoftwareRenderer().render(d,0,0,2,1);require(out->pixel(0,0)==Pixel{128,0,0,128}&&out->pixel(1,0)==Pixel{},"hidden clipping alpha / grayscale mask");};
+tests["history_save_noop_redo"]=[]{History h;std::optional<Document>d=Document{};h.begin("Add",d,"");Layer l;l.id="a";d->layers.push_back(l);h.end(d,"a");h.markSaved();h.begin("Rename",d,"a");d->layers[0].name="Changed";h.end(d,"a");require(h.modified(),"dirty");d=h.undo()->document;require(!h.modified()&&h.canRedo(),"saved revision");h.begin("No-op",d,"a");h.end(d,"a");require(h.canRedo(),"no-op discarded redo");d=h.redo()->document;require(d->layers[0].name=="Changed"&&h.modified(),"redo snapshot");};
+tests["history_nested_cancel"]=[]{History h;std::optional<Document>d=Document{};h.begin("Outer",d,"");h.begin("Inner",d,"");d->width=9;h.end(d,"");require(!h.canUndo(),"nested transaction active");h.end(d,"");require(h.undoCount()==1&&h.undoName()=="Outer","one entry");h.begin("Cancel",d,"");d->width=5;d=h.cancel()->document;require(d->width==9&&h.undoCount()==1,"cancel restored");};
+tests["history_unique_retention"]=[]{History h;h.byteLimit=0;h.entryLimit=2;std::optional<Document>d=Document{};Layer l;l.id="a";l.raster=Raster::filled(1,1);d->layers={l};for(int i=0;i<3;++i){h.begin("Rename",d,"a");d->layers[0].name=std::to_string(i);h.end(d,"a");}require(h.undoCount()==2&&h.retainedBytes(d)==0,"shared raster counted");h.begin("Delete",d,"a");d->layers.clear();h.end(d,"");require(h.undoCount()==0,"retention limit");};
+tests["history_animation_pixels"]=[]{History h;std::optional<Document>d=Document{};Layer l;l.id="gif";auto first=Raster::filled(1,1,{255,0,0,255});auto second=Raster::filled(1,1,{0,0,255,255});l.raster=first;l.animation=GifAnimation{{{first,100},{second,200}},0};d->layers={l};h.begin("Paint",d,"gif");auto edited=Raster::filled(1,1,{0,255,0,255});d->layers[0].raster=edited;h.end(d,"gif");require(d->layers[0].animation->frames[0].raster==edited,"edited frame was not synchronized");auto undone=h.undo();require(undone->document->layers[0].animation->frames[0].raster==first,"undo lost original frame");auto redone=h.redo();require(redone->document->layers[0].animation->frames[0].raster==edited&&redone->document->layers[0].animation->frames[1].raster==second,"redo lost edited or untouched frame");};
+tests["history_raw_large_steps"]=[]{
+    History h;h.byteLimit=0;h.minimumEntries=2;std::optional<Document> d;
+    Document imported;imported.width=1;imported.height=1;Layer l;l.id="raw";l.raster=Raster::filled(1,1,{100,100,100,255});imported.layers={l};
+    h.begin("Import",d,"");d=imported;h.end(d,"raw");
+    d=h.undo()->document;require(!d&&h.canRedo(),"oversized import was discarded on undo");
+    d=h.redo()->document;require(d&&d->layers[0].raster==l.raster,"oversized import could not be redone");
+    h.begin("Filter",d,"raw");d->layers[0].raster=Raster::filled(1,1,{150,150,150,255});h.end(d,"raw");
+    require(h.undoCount()==2,"oversized filter removed the import history");
+    d=h.undo()->document;require(d&&d->layers[0].raster==l.raster,"first undo did not restore the imported pixels");
+    d=h.undo()->document;require(!d,"second undo did not remove the import");
+    d=h.redo()->document;require(d&&d->layers[0].raster==l.raster,"redo did not restore import");
+    d=h.redo()->document;require(d&&d->layers[0].raster->pixel(0,0).r==150,"redo did not restore filter");
+};
+tests["selection_absent_empty"]=[]{Document a,b;b.selection=Selection{std::make_shared<GrayRaster>()};require(a!=b,"absent and empty collapsed");};
+tests["reject_invalid_document"]=[]{Document d;d.width=30001;bool rejected=false;try{validateDocument(d);}catch(...){rejected=true;}require(rejected,"dimension accepted");d.width=1;Layer l;l.id="a";l.parentId="a";l.group=true;d.layers={l};rejected=false;try{validateDocument(d);}catch(...){rejected=true;}require(rejected,"cycle accepted");};
+tests["wide_narrow_image"]=[]{auto r=Raster::filled(30000,1,{1,2,3,255});require(r->pixel(29999,0)==Pixel{1,2,3,255},"wide raster");};
+try{if(argc!=2||!tests.contains(argv[1]))throw std::runtime_error("Select a registered test case");tests.at(argv[1])();std::cout<<"PASS "<<argv[1]<<'\n';return 0;}catch(const std::exception&e){std::cerr<<"FAIL "<<(argc>1?argv[1]:"")<<": "<<e.what()<<'\n';return 1;}}

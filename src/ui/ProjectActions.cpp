@@ -1,0 +1,347 @@
+#include "MainWindow.h"
+#include <algorithm>
+#include <cmath>
+#include <iterator>
+#include <string_view>
+#include "ImportActions.h"
+#include "WorkspaceDropQueue.h"
+#include "ProjectLayerCopyJob.h"
+#include "LayerMergeJob.h"
+#include "LastFilterJob.h"
+#include "LayerPanel.h"
+#include "EditorIcons.h"
+#include <QApplication>
+#include <QClipboard>
+#include <QComboBox>
+#include <QDialogButtonBox>
+#include <QDoubleSpinBox>
+#include <QSpinBox>
+#include <QStandardItemModel>
+#include <QDockWidget>
+#include <QFormLayout>
+#include <QHBoxLayout>
+#include <QEvent>
+#include <QLabel>
+#include <QMoveEvent>
+#include <QPaintEvent>
+#include <QPainter>
+#include <QPushButton>
+#include <QResizeEvent>
+#include <QSignalBlocker>
+#include <QScopeGuard>
+#include <QStatusBar>
+#include <QTabBar>
+#include <QTimer>
+#include <QToolButton>
+#include <QVBoxLayout>
+
+namespace compositor {
+namespace {
+struct NewCanvasPreset { const char* category; const char* label; editing::PrintUnit unit; double width; double height; double dpi; };
+// Entries are grouped by category; each category appears as a disabled heading. Custom is not listed and keeps the current size.
+constexpr NewCanvasPreset newCanvasPresets[]{
+    {"Photo","4 × 6 in · landscape",editing::PrintUnit::Inches,6,4,300},
+    {"Photo","4 × 6 in · portrait",editing::PrintUnit::Inches,4,6,300},
+    {"Photo","5 × 7 in · landscape",editing::PrintUnit::Inches,7,5,300},
+    {"Photo","5 × 7 in · portrait",editing::PrintUnit::Inches,5,7,300},
+    {"Photo","8 × 10 in · landscape",editing::PrintUnit::Inches,10,8,300},
+    {"Photo","8 × 10 in · portrait",editing::PrintUnit::Inches,8,10,300},
+    {"Print","Letter · 8.5 × 11 in",editing::PrintUnit::Inches,8.5,11,300},
+    {"Print","Legal · 8.5 × 14 in",editing::PrintUnit::Inches,8.5,14,300},
+    {"Print","Tabloid · 11 × 17 in",editing::PrintUnit::Inches,11,17,300},
+    {"Print","A4 · 210 × 297 mm",editing::PrintUnit::Millimeters,210,297,300},
+    {"Print","A3 · 297 × 420 mm",editing::PrintUnit::Millimeters,297,420,300},
+    {"Art & Illustration","Poster · 18 × 24 in",editing::PrintUnit::Inches,18,24,300},
+    {"Art & Illustration","Postcard · 4 × 6 in",editing::PrintUnit::Inches,4,6,300},
+    {"Web","Web · 1366 × 768",editing::PrintUnit::Pixels,1366,768,72},
+    {"Web","Web · 1440 × 900",editing::PrintUnit::Pixels,1440,900,72},
+    {"Web","Full HD · 1920 × 1080",editing::PrintUnit::Pixels,1920,1080,72},
+    {"Web","Square · 1080 × 1080",editing::PrintUnit::Pixels,1080,1080,72},
+    {"Web","Vertical HD · 1080 × 1920",editing::PrintUnit::Pixels,1080,1920,72},
+    {"Film & Video","HD · 1280 × 720",editing::PrintUnit::Pixels,1280,720,72},
+    {"Film & Video","4K UHD · 3840 × 2160",editing::PrintUnit::Pixels,3840,2160,72},
+};
+// Whole pixels are the source of truth. Units and DPI only change how that count is displayed or converted when typed.
+// preset is the table entry that produced the current pixels, or -1 after a manual size edit.
+struct NewCanvasDraft { int width{1920},height{1080}; editing::PrintUnit unit{editing::PrintUnit::Pixels}; double dpi{72}; int preset{-1}; };
+// Raster::filled enforces this budget for an opaque background; a transparent canvas allocates no pixels.
+constexpr uint64_t solidCanvasPixelBudget=100000000;
+// Qt shortens the tab bar for the corner widget, so its bottom edge stops at the
+// button while the Layers title border sits on a lower pixel behind it. The
+// corner matches the tab-bar height and one separator runs from the strip's left
+// edge through the clearance before the dock. The Layers title uses that height
+// so its border is the same row.
+class WorkspaceTabCorner final : public QWidget {
+public:
+    explicit WorkspaceTabCorner(QTabWidget* tabs):QWidget(tabs),tabs_(tabs){
+        setObjectName("newProjectCorner");
+        auto* layout=new QHBoxLayout(this);
+        layout->setContentsMargins(0,0,6,0);
+        layout->setSpacing(0);
+        button_=new QToolButton(this);
+        button_->setObjectName("newProjectDropTarget");
+        button_->setFixedSize(32,30);
+        layout->addWidget(button_,0,Qt::AlignVCenter);
+        line_=new QWidget(tabs_);
+        line_->setObjectName("workspaceSeparator");
+        line_->setAttribute(Qt::WA_TransparentForMouseEvents);
+        line_->setAttribute(Qt::WA_AlwaysStackOnTop);
+        line_->setSizePolicy(QSizePolicy::Ignored,QSizePolicy::Ignored);
+        line_->setStyleSheet("background:#303237;");
+        line_->hide();
+        tabs_->installEventFilter(this);
+    }
+    QToolButton* button() const { return button_; }
+    QSize sizeHint() const override {
+        const int strip=tabs_?std::max(30,tabs_->tabBar()->sizeHint().height()):30;
+        return {38,strip};
+    }
+protected:
+    bool eventFilter(QObject* watched,QEvent* event) override {
+        if(watched==tabs_&&(event->type()==QEvent::Resize||event->type()==QEvent::Show||event->type()==QEvent::LayoutRequest))schedule();
+        return false;
+    }
+    void moveEvent(QMoveEvent* event) override { QWidget::moveEvent(event); schedule(); }
+    void resizeEvent(QResizeEvent* event) override { QWidget::resizeEvent(event); schedule(); }
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.fillRect(rect(),QColor(0x20,0x21,0x25));
+    }
+private:
+    void schedule(){if(pending_)return;pending_=true;QTimer::singleShot(0,this,[this]{pending_=false;align();});}
+    void align(){
+        if(!tabs_||aligning_)return;
+        const QRect bar=tabs_->tabBar()->geometry();
+        if(bar.height()<30||bar.width()<=0)return;
+        const QRect goal(bar.right()+1,bar.top(),38,bar.height());
+        const QRect separator(bar.left(),bar.bottom(),goal.right()-bar.left()+1,1);
+        if(auto* dock=tabs_->window()->findChild<QDockWidget*>("layersDock"))
+            if(auto* title=dock->titleBarWidget())if(title->height()!=bar.height())title->setFixedHeight(bar.height());
+        if(geometry()==goal&&line_->geometry()==separator)return;
+        aligning_=true;
+        setGeometry(goal);
+        line_->setGeometry(separator);
+        line_->show();
+        line_->raise();
+        aligning_=false;
+    }
+    QTabWidget* tabs_{};
+    QToolButton* button_{};
+    QWidget* line_{};
+    bool aligning_{};
+    bool pending_{};
+};
+void detach(NativeCanvas*canvas){
+    canvas->pointerDown={};canvas->pointerDoubleClick={};canvas->pointerMove={};canvas->pointerUp={};canvas->pointerCancel={};canvas->pointerInterrupted={};
+    canvas->pointerHover={};canvas->pointerLeave={};canvas->rightPointerDown={};canvas->rightPointerMove={};canvas->navigationAllowed={};canvas->viewportProvider={};canvas->navigatorProvider={};
+    canvas->guideDragUpdated={};canvas->guideDragFinished={};canvas->guideDragCanceled={};
+}
+}
+MainWindow::~MainWindow(){
+    delete textFontPopup_.data();
+    if(movePreviewJob_)movePreviewJob_->shutdown();
+    if(viewportComposite_)viewportComposite_->shutdown();
+    detachOpacityPercent();
+    qApp->removeEventFilter(this);stopSelectionAutoscroll();
+    cancelEditPanel();
+    std::vector<QPointer<ui::EditPanelSession>> panels;
+    for(auto* object:findChildren<QObject*>())if(auto* session=dynamic_cast<ui::EditPanelSession*>(object))panels.push_back(session);
+    for(const auto& session:panels)if(session)delete session.data();
+    // Qt destroys child widgets after derived members. No callback may then use
+    // the already-destroyed project vector or a worker's completion host.
+    for(auto&p:projects_)detach(p->canvas);
+    if(auto* panel=ui::LayerPanelController::find(layers_))panel->finishVisibilitySwipe();
+    finishVisibilitySwipe();
+    delete ui::LayerPanelController::find(layers_);
+    delete workspaceDrops_;workspaceDrops_=nullptr;
+    delete ui::ProjectLayerCopyJob::find(this);
+    delete ui::LayerMergeJob::find(this);
+    while(auto* job=ui::LastFilterJob::find(this))delete job;
+    delete commands_;commands_=nullptr;
+    delete importQueue_;importQueue_=nullptr;
+}
+void MainWindow::initializeProject(EditorProject&project){
+    if(!tabs_->cornerWidget(Qt::TopRightCorner)){
+        auto* corner=new WorkspaceTabCorner(tabs_);auto* button=corner->button();
+        for(auto* action:findChildren<QAction*>())if(action->property("commandId").toString()=="file.new"){button->setDefaultAction(action);break;}
+        if(!button->defaultAction())connect(button,&QToolButton::clicked,this,[this]{newDialog();});
+        button->setToolButtonStyle(Qt::ToolButtonIconOnly);button->setIcon(ui::editorIcon(ui::EditorIcon::Plus));
+        if(button->defaultAction())connect(button->defaultAction(),&QAction::changed,button,[button]{button->setIcon(ui::editorIcon(ui::EditorIcon::Plus));});
+        button->setText("+");button->setAccessibleName("New canvas; drop into a new project");button->setToolTip("New canvas · Drop images or layers here for new projects");tabs_->setCornerWidget(corner,Qt::TopRightCorner);
+    }
+    project.canvas=new NativeCanvas(warp_);
+    project.canvas->showPixelGrid=true;
+    project.canvas->pointerDown=[this](NativeCanvas::PointerSample p,Qt::KeyboardModifiers m){try{pointerBegin(p.position,m,1,p.pressure);}catch(const std::exception&e){pointerCancel();statusBar()->showMessage(e.what());}};
+    project.canvas->pointerDoubleClick=[this](QPointF p,Qt::KeyboardModifiers m){try{pointerBegin(p,m,2);}catch(const std::exception&e){pointerCancel();statusBar()->showMessage(e.what());}};
+    project.canvas->pointerMove=[this](NativeCanvas::PointerSample p,Qt::KeyboardModifiers m){try{pointerUpdate(p.position,m,p.pressure.value_or(1));}catch(const std::exception&e){pointerCancel();statusBar()->showMessage(e.what());}};
+    project.canvas->pointerUp=[this](NativeCanvas::PointerSample p,Qt::KeyboardModifiers m){try{pointerEnd(p.position,m,p.pressure.value_or(1));}catch(const std::exception&e){pointerCancel();statusBar()->showMessage(e.what());}};
+    project.canvas->pointerCancel=[this]{pointerCancel();};project.canvas->pointerInterrupted=[this]{interruptPointer();};
+    project.canvas->pointerHover=[this](QPointF point,Qt::KeyboardModifiers flags){if(editPanel_)editPanel_->sampleHover({point.x(),point.y()});updateBrushPointer(point,flags);hoverSelection(point,flags);};
+    project.canvas->pointerLeave=[this]{clearBrushPointer();if(selectionGesture_.draft()&&selectionGesture_.draft()->kind==editing::LassoKind::Polygonal){selectionGesture_.moveCursor({});refreshSelectionGesture();}};
+    project.canvas->rightPointerDown=[this](QPointF point,Qt::KeyboardModifiers flags){return beginBrushTip(point,flags);};
+    project.canvas->rightPointerMove=[this](QPointF point,Qt::KeyboardModifiers flags,bool finish){updateBrushTip(point,flags,finish);};
+    project.canvas->navigationAllowed=[this]{return canvasNavigationAllowed();};
+    project.canvas->textKey=[this](QKeyEvent* event){return handleTextKey(event);};
+    project.canvas->textInput=[this](QInputMethodEvent* event){handleTextInput(event);};
+    auto*owner=&project;project.canvas->viewportProvider=[this,owner](double x,double y,double w,double h,double units){return brushViewport(*owner,x,y,w,h,units);};
+    project.canvas->navigatorProvider=[this,owner](int edge){return navigatorComposite(*owner,edge);};
+    project.canvas->guideDragUpdated=[this](bool horizontal,double position){statusBar()->showMessage(QString("%1 guide %2").arg(horizontal?QStringLiteral("Horizontal"):QStringLiteral("Vertical")).arg(position,0,'f',1));};
+    project.canvas->guideDragCanceled=[this]{statusBar()->clearMessage();};
+    project.canvas->guideDragFinished=[this](bool horizontal,double position,int index){
+        try{
+            if(auto* item=findChild<QAction*>("viewGuides"))item->setChecked(true);
+            if(auto* surface=canvas())surface->showGuides=true;
+            if(index<0)edit("Add Guide",[horizontal,position](Document& document){document.guides.push_back({newId(),horizontal,position});});
+            else edit("Move Guide",[index,horizontal,position](Document& document){
+                if(index<0||size_t(index)>=document.guides.size()||document.guides[size_t(index)].horizontal!=horizontal)return;
+                document.guides[size_t(index)].position=position;
+            });
+        }catch(const std::exception& error){statusBar()->showMessage(error.what());}
+    };
+}
+bool MainWindow::canSwitchProjects(){
+    const auto state=commandState(activeProject_);return !state.modalDialog&&ui::canSwitchProject(state);
+}
+void MainWindow::switchProject(){
+    auto*next=current();if(next==activeProject_){refresh(false);return;}
+    if(activeProject_&&!selectingProjectForOpen_&&!canSwitchProjects()){
+        for(size_t i=0;i<projects_.size();++i)if(projects_[i].get()==activeProject_){QSignalBlocker block(tabs_);tabs_->setCurrentIndex(int(i));break;}
+        return;
+    }
+    if(auto* panel=ui::LayerPanelController::find(layers_))panel->finishVisibilitySwipe();
+    finishVisibilitySwipe();finishOpacityEdit();
+    if(textFontPopup_)textFontPopup_->hide();
+    if(textSession_&&textSession_->owner==activeProject_)finishText();
+    if(activeProject_)captureToolState(*activeProject_);
+    if(transformSession_&&transformSession_->persistent)applyTransformSession();
+    pointerCancel();activeProject_=next;
+    if(next)restoreToolState(*next);
+    refresh();
+}
+EditorProject& MainWindow::addEmptyProject(bool reuseEmpty){
+    if(reuseEmpty&&projects_.size()==1&&!projects_.front()->document&&!projects_.front()->importing&&
+       (!importQueue_||!importQueue_->contains(projects_.front()->canvas)))return *projects_.front();
+    const bool first=projects_.empty();auto project=std::make_unique<EditorProject>();auto*raw=project.get();
+    raw->defaultTitle=first&&nextProjectNumber_==2?"Untitled":QString("Untitled %1").arg(nextProjectNumber_++);
+    initializeProject(*raw);applyRememberedBrushPressure(raw->toolState.brushSettings);applyRememberedSnapAndGrid(raw->toolState.snapPolicy,raw->toolState.layoutGrid);raw->page=new QStackedWidget;raw->page->setObjectName("projectPage");
+    raw->welcome=new QWidget;raw->welcome->setObjectName("newCanvasWelcome");auto*outer=new QVBoxLayout(raw->welcome);outer->addStretch();
+    auto*row=new QHBoxLayout;row->addStretch();auto*panel=new QWidget;panel->setObjectName("newCanvasCard");panel->setMaximumWidth(440);
+    panel->setStyleSheet("QWidget#newCanvasCard { background: #27292e; border: 1px solid #3b3e46; border-radius: 14px; } QLabel { background: transparent; } QLabel#newCanvasHeading { font-size: 28px; font-weight: 500; margin-bottom: 14px; }");
+    auto*form=new QFormLayout(panel);form->setContentsMargins(28,28,28,26);form->setVerticalSpacing(14);form->setHorizontalSpacing(18);
+    auto*heading=new QLabel("New canvas");heading->setObjectName("newCanvasHeading");QFont font=heading->font();font.setPointSize(20);heading->setFont(font);form->addRow(heading);
+    auto draft=std::make_shared<NewCanvasDraft>();
+    auto*preset=new QComboBox;preset->setObjectName("newCanvasPreset");preset->setAccessibleName("Canvas preset");
+    preset->addItem("Custom",-1);
+    std::string_view category;int defaultPreset=0;
+    for(int entry=0;entry<int(std::size(newCanvasPresets));++entry){
+        const auto& item=newCanvasPresets[entry];
+        if(item.category!=category){category=item.category;preset->addItem(QString::fromUtf8(item.category));static_cast<QStandardItemModel*>(preset->model())->item(preset->count()-1)->setEnabled(false);}
+        preset->addItem(item.label,entry);
+        if(item.unit==editing::PrintUnit::Pixels&&item.width==1920&&item.height==1080)defaultPreset=preset->count()-1;
+    }
+    preset->setCurrentIndex(defaultPreset);
+    auto*unit=new QComboBox;unit->setObjectName("newCanvasUnit");unit->setAccessibleName("Canvas units");
+    unit->addItem("Pixels",int(editing::PrintUnit::Pixels));unit->addItem("Inches",int(editing::PrintUnit::Inches));unit->addItem("Centimeters",int(editing::PrintUnit::Centimeters));unit->addItem("Millimeters",int(editing::PrintUnit::Millimeters));
+    auto*resolution=new QSpinBox;resolution->setObjectName("newCanvasResolution");resolution->setAccessibleName("Resolution");resolution->setRange(1,9600);resolution->setValue(72);resolution->setSuffix(" DPI");
+    auto*width=new QDoubleSpinBox;auto*height=new QDoubleSpinBox;width->setObjectName("newCanvasWidth");height->setObjectName("newCanvasHeight");width->setAccessibleName("Width");height->setAccessibleName("Height");
+    auto*background=new QComboBox;background->setObjectName("newCanvasBackground");background->setAccessibleName("Background");
+    background->addItem("Transparent",QColor(Qt::transparent));background->addItem("White",QColor(Qt::white));background->addItem("Black",QColor(Qt::black));
+    auto*summary=new QLabel;summary->setObjectName("newCanvasSummary");
+    if(!first){const auto image=QApplication::clipboard()->image();if(!image.isNull()&&image.width()<=30000&&image.height()<=30000){draft->width=image.width();draft->height=image.height();preset->setCurrentIndex(0);}}
+    form->addRow("Preset",preset);form->addRow("Units",unit);form->addRow("Width",width);form->addRow("Height",height);form->addRow("Resolution",resolution);form->addRow("Background",background);form->addRow(summary);
+    auto*buttons=new QDialogButtonBox;auto*open=buttons->addButton("Open project",QDialogButtonBox::ActionRole);auto*import=buttons->addButton("Import image",QDialogButtonBox::ActionRole);import->setObjectName("welcomeImportImage");auto*create=buttons->addButton("Create canvas",QDialogButtonBox::AcceptRole);create->setObjectName("createCanvas");create->setDefault(true);form->addRow(buttons);
+    connect(open,&QPushButton::clicked,this,[this]{openProjectDialog();});connect(import,&QPushButton::clicked,this,[this]{importWelcomeImage();});
+    // Shows the draft in every control. Typed spin text is rewritten only when requested, so a value being typed is not moved under the caret.
+    auto syncNewCanvas=[draft,width,height,summary,background,create](bool rewriteSizes){
+        const bool pixelMode=draft->unit==editing::PrintUnit::Pixels;
+        const auto shown=[draft](int pixels){return std::round(editing::creationDisplayed(pixels,draft->unit,draft->dpi)*10000)/10000;};
+        const char* suffix=pixelMode?" px":draft->unit==editing::PrintUnit::Inches?" in":draft->unit==editing::PrintUnit::Centimeters?" cm":" mm";
+        const char* unitName=pixelMode?"pixels":draft->unit==editing::PrintUnit::Inches?"inches":draft->unit==editing::PrintUnit::Centimeters?"centimeters":"millimeters";
+        // A preset shows its own print size while its unit and resolution remain selected, because 2480 px is 209.9733 mm at 300 DPI.
+        const bool presetSize=draft->preset>=0&&newCanvasPresets[draft->preset].unit==draft->unit&&newCanvasPresets[draft->preset].dpi==draft->dpi;
+        const auto sync=[&](QDoubleSpinBox* box,int pixels,double nominal){const QSignalBlocker blocker(box);box->setDecimals(pixelMode?0:4);box->setRange(shown(1),shown(30000));box->setSuffix(suffix);box->setValue(presetSize?nominal:shown(pixels));};
+        if(rewriteSizes){width->setAccessibleName(QString("Width in %1").arg(unitName));height->setAccessibleName(QString("Height in %1").arg(unitName));sync(width,draft->width,presetSize?newCanvasPresets[draft->preset].width:0);sync(height,draft->height,presetSize?newCanvasPresets[draft->preset].height:0);}
+        const bool solid=background->currentData().value<QColor>().alpha()>0;
+        const bool fits=!solid||uint64_t(draft->width)*uint64_t(draft->height)<=solidCanvasPixelBudget;
+        create->setEnabled(fits);
+        summary->setText(!fits?QStringLiteral("Solid backgrounds are limited to 100 megapixels"):pixelMode?QStringLiteral("sRGB"):QString("%1 × %2 px · sRGB").arg(draft->width).arg(draft->height));
+    };
+    syncNewCanvas(true);
+    connect(preset,&QComboBox::currentIndexChanged,[draft,preset,unit,resolution,syncNewCanvas](int index){
+        const QVariant data=preset->itemData(index);if(!data.isValid()||data.toInt()<0)return;
+        const auto& item=newCanvasPresets[data.toInt()];
+        draft->unit=item.unit;draft->dpi=item.dpi;draft->preset=data.toInt();
+        {const QSignalBlocker blockUnit(unit),blockResolution(resolution);unit->setCurrentIndex(unit->findData(int(item.unit)));resolution->setValue(int(item.dpi));}
+        draft->width=editing::creationPixels(item.width,item.unit,item.dpi).value();draft->height=editing::creationPixels(item.height,item.unit,item.dpi).value();
+        syncNewCanvas(true);
+    });
+    // A preset keeps its label only while its unit and resolution are selected. Otherwise its pixels no longer print at the stated size.
+    auto leavePresetIfChanged=[draft,preset](){
+        if(draft->preset<0)return;
+        const auto& item=newCanvasPresets[draft->preset];
+        if(item.unit!=draft->unit||item.dpi!=draft->dpi){draft->preset=-1;const QSignalBlocker blocker(preset);preset->setCurrentIndex(0);}
+    };
+    connect(unit,&QComboBox::currentIndexChanged,[draft,unit,syncNewCanvas,leavePresetIfChanged](int index){draft->unit=editing::PrintUnit(unit->itemData(index).toInt());leavePresetIfChanged();syncNewCanvas(true);});
+    connect(resolution,&QSpinBox::valueChanged,[draft,syncNewCanvas,leavePresetIfChanged](int dpi){draft->dpi=dpi;leavePresetIfChanged();syncNewCanvas(true);});
+    connect(width,&QDoubleSpinBox::valueChanged,[draft,preset,syncNewCanvas](double value){if(auto pixels=editing::creationPixels(value,draft->unit,draft->dpi)){draft->width=*pixels;draft->preset=-1;preset->setCurrentIndex(0);}syncNewCanvas(false);});
+    connect(height,&QDoubleSpinBox::valueChanged,[draft,preset,syncNewCanvas](double value){if(auto pixels=editing::creationPixels(value,draft->unit,draft->dpi)){draft->height=*pixels;draft->preset=-1;preset->setCurrentIndex(0);}syncNewCanvas(false);});
+    connect(background,&QComboBox::currentIndexChanged,[syncNewCanvas](int){syncNewCanvas(false);});
+    connect(create,&QPushButton::clicked,this,[this,raw,draft,background]{
+        if(raw!=current()||raw->document||raw->importing||raw->projectBusy)return;
+        const QColor color=background->currentData().value<QColor>();const bool solid=color.alpha()>0;
+        if(solid&&uint64_t(draft->width)*uint64_t(draft->height)>solidCanvasPixelBudget)return;
+        Document document;document.id=newId();document.width=draft->width;document.height=draft->height;document.resolution=draft->dpi;
+        Layer layer;layer.id=newId();layer.name=solid?"Background":"Layer 1";layer.transform={0,0,double(document.width),double(document.height)};
+        if(solid)layer.raster=Raster::filled(document.width,document.height,Pixel{uint8_t(color.red()),uint8_t(color.green()),uint8_t(color.blue()),255});
+        document.layers.push_back(layer);
+        raw->history.begin("New Canvas",std::nullopt,{});raw->document=std::move(document);raw->active=layer.id;raw->selected={layer.id};raw->history.end(raw->document,raw->active);refresh();raw->canvas->fit();raw->canvas->setFocus();
+    });
+    row->addWidget(panel);row->addStretch();outer->addLayout(row);outer->addStretch();raw->page->addWidget(raw->welcome);raw->page->addWidget(raw->canvas);
+    projects_.push_back(std::move(project));const auto index=tabs_->addTab(raw->page,raw->defaultTitle);tabs_->setCurrentIndex(index);switchProject();width->setFocus();return *raw;
+}
+EditorProject& MainWindow::addProject(Document document,QString title,bool reuseEmpty){
+    validateDocument(document);
+    const auto restoreNumber=qScopeGuard([this,reuseEmpty,number=nextProjectNumber_]{if(!reuseEmpty)nextProjectNumber_=number;});
+    // A drop marks the workspace busy, which otherwise refuses the tab change
+    // onto the project that is about to receive the document. The refused
+    // change then deletes the still-active project.
+    const bool previousSelecting=selectingProjectForOpen_;
+    selectingProjectForOpen_=true;
+    const auto restoreSelecting=qScopeGuard([this,previousSelecting]{selectingProjectForOpen_=previousSelecting;});
+    const bool replaceWelcome=!reuseEmpty&&projects_.size()==1&&!projects_.front()->document&&!projects_.front()->importing&&!projects_.front()->projectBusy&&(!importQueue_||!importQueue_->contains(projects_.front()->canvas));
+    auto&project=addEmptyProject(reuseEmpty);project.document=std::move(document);project.active=project.document->layers.empty()?"":project.document->layers.back().id;project.selected={project.active};project.defaultTitle=title;if(!project.document->guides.empty())project.canvas->showGuides=true;
+    if(replaceWelcome){
+        // ProjectWorkspace.swift:81-86: attach the successfully loaded fresh
+        // session before discarding the sole empty welcome session. Tab-change
+        // callbacks already selected the new owner in addEmptyProject(false).
+        auto* previous=projects_.front().get();if(activeProject_==previous)activeProject_=nullptr;detach(previous->canvas);
+        previous->page->setEnabled(false);previous->page->hide();
+        {QSignalBlocker blocked(tabs_);tabs_->removeTab(0);}
+        previous->page->deleteLater();projects_.erase(projects_.begin());
+        if(!activeProject_)activeProject_=&project;
+    }
+    refresh();project.canvas->fit();project.canvas->setFocus();return project;
+}
+void MainWindow::newDialog(){if(canSwitchProjects())addEmptyProject(false);}
+CompositeViewport MainWindow::navigatorComposite(EditorProject& project,int maxEdge){
+    if(!project.document||maxEdge<1)return {};
+    const int edge=std::clamp(maxEdge,1,256);
+    const double units=std::clamp(std::max(1.,std::max(project.document->width,project.document->height)/double(edge)),1./32.,30000.);
+    // A separate cache keeps the interactive viewport tiles. The same units key
+    // would discard them on every overview pass.
+    auto render=[&](const Document& document,std::shared_ptr<const LayerRenderPreview> layerPreview={}){
+        return project.navigatorCache.renderViewport(document,0,0,document.width,document.height,units,4,16,std::move(layerPreview));
+    };
+    if(auto preview=editPanelPreview(project))return render(*preview);
+    if(project.blendPreview&&project.active==project.blendPreview->first){
+        auto preview=*project.document;
+        for(auto& layer:preview.layers)if(layer.id==project.blendPreview->first){layer.blend=project.blendPreview->second;break;}
+        return render(preview);
+    }
+    if(project.textPreview)return render(*project.document,project.textPreview);
+    if(project.gradientPreview)return render(*project.document,project.gradientPreview->renderPreview());
+    if(project.retouchPreview)return render(*project.document,project.retouchPreview);
+    if(project.brushPreview)return render(*project.document,project.brushPreview->renderPreview());
+    return render(*project.document);
+}
+}

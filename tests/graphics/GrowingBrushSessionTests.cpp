@@ -1,0 +1,178 @@
+#include "graphics/GrowingBrushSession.h"
+#include "core/DeepImage.h"
+#include "graphics/RasterSampling.h"
+#include "graphics/MaskSampling.h"
+#include "graphics/StackRenderer.h"
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <stdexcept>
+using namespace compositor;
+using namespace compositor::graphics;
+#define REQUIRE(...) do{if(!(__VA_ARGS__))throw std::runtime_error(std::string(__FILE__)+":"+std::to_string(__LINE__)+": " #__VA_ARGS__);}while(false)
+Layer layer(int w,int h,Pixel pixel={}){Layer l;l.id=newId();l.raster=Raster::filled(w,h,pixel);l.transform={0,0,double(w),double(h)};return l;}
+BrushSessionSettings settings(){BrushSessionSettings s;s.radius=5;s.hardness=1;s.color={0,0,255};return s;}
+void deep_brush(){
+    auto l=layer(32,16);auto deep=makeDeep(32,16,DeepImage::Format::Unorm16);
+    for(int y=0;y<16;++y)for(int x=0;x<32;++x){auto p=deep->at(x,y);p[0]=10001;p[1]=20003;p[2]=30007;p[3]=65535;}
+    l.deep=deep;l.raster=rasterFromDeep(*deep);auto s=settings();s.opacity=.5;
+    GrowingBrushSession stroke(l,s,32,16);stroke.begin({8,8});auto result=stroke.commit()->materializeLayer();
+    REQUIRE(result.deep&&result.deep->format==DeepImage::Format::Unorm16);
+    REQUIRE(result.deep->at(31,8)[0]==10001&&result.deep->at(8,8)[0]<10001&&result.deep->at(8,8)[2]>30007);
+    GrowingBrushSession cancelled(l,s,32,16);cancelled.begin({8,8});REQUIRE(cancelled.cancel()->materializeLayer()==l);
+}
+void pen_pressure() {
+    const auto base=layer(96,48);
+    auto s=settings();s.radius=8;s.opacity=.8;
+    const Point click{30.5,24.5};
+    const auto dab=[&](double pressure) {
+        GrowingBrushSession stroke(base,s,96,48);
+        stroke.begin(click,pressure);
+        return stroke.commit();
+    };
+    for(bool size:{false,true})for(bool opacity:{false,true}){
+        s.pressureSize=size;s.pressureOpacity=opacity;
+        const auto faint=dab(.25),full=dab(1);
+        REQUIRE(faint->pixel(30,24).a==(opacity?51:204));
+        REQUIRE(faint->pixel(35,24).a==(size?0:(opacity?51:204)));
+        REQUIRE(full->pixel(35,24).a==204);
+    }
+    REQUIRE(!dab(0)->changed()&&!dab(-1)->changed());
+    REQUIRE(dab(std::numeric_limits<double>::quiet_NaN())->pixel(35,24)==dab(2)->pixel(35,24));
+    s.pressureOpacity=false;
+    REQUIRE(dab(0)->pixel(30,24).a==204&&dab(0)->pixel(32,24).a==0);
+    s.pressureOpacity=true;
+    GrowingBrushSession stroke(base,s,96,48);
+    stroke.begin({16.5,24.5},.25);
+    stroke.append({80.5,24.5},1);
+    const auto live=stroke.preview();
+    const auto result=stroke.commit();
+    REQUIRE(live->pixel(48,24)==result->pixel(48,24));
+    // The strongest fully covered tip reaches this pixel at t=33.5/58,
+    // where its pressure is .25 + .75*t and the toolbar opacity is .8.
+    REQUIRE(std::abs(int(result->pixel(48,24).a)-139)<=1);
+    REQUIRE(result->pixel(20,29).a==0&&result->pixel(74,29).a>0);
+    for(double hardness:{0.,1.}){
+        s.hardness=hardness;
+        GrowingBrushSession stationary(base,s,96,48);
+        stationary.begin(click,0);
+        REQUIRE(!stationary.preview()->changed());
+        REQUIRE(!stationary.append(click,-1));
+        REQUIRE(stationary.append(click,.25));
+        REQUIRE(stationary.preview()->pixel(30,24).a==51);
+        REQUIRE(stationary.append(click,1));
+        REQUIRE(stationary.preview()->pixel(35,24)==dab(1)->pixel(35,24));
+        REQUIRE(stationary.preview()->pixel(30,24).a==204);
+        REQUIRE(!stationary.append(click,2));
+        REQUIRE(stationary.commit()->pixel(30,24).a==204);
+    }
+    GrowingBrushSession canceled(base,s,96,48);
+    canceled.begin(click,.25);
+    REQUIRE(canceled.preview()->changed()&&canceled.cancel()->materializeLayer()==base);
+
+    auto masked=base;
+    masked.mask=Mask{std::make_shared<GrayRaster>(GrayRaster{1,1,{0}})};
+    s.color={255,255,255};
+    GrowingBrushSession mask(masked,s,96,48,{},{},true);
+    mask.begin(click,.25);
+    const auto paintedMask=mask.commit()->materializeLayer();
+    REQUIRE(paintedMask.raster==masked.raster&&paintedMask.mask->raster->pixel(30,24)==51);
+}
+void unchanged_grid(){auto l=layer(512,256,{64,32,16,128});auto s=settings();s.hardness=.3;s.opacity=.6;BrushSession old(l.raster,s);GrowingBrushSession grown(l,s,512,256);for(Point p:std::array<Point,4>{{{60,80},{90,100},{120,70},{150,105}}}){if(p.x==60){old.begin(p);grown.begin(p);}else{old.append(p);grown.append(p);}}auto a=old.commit(),b=grown.commit()->materializeLayer().raster;for(int y=0;y<256;++y)for(int x=0;x<512;++x)REQUIRE(a->pixel(x,y)==b->pixel(x,y));REQUIRE(b->tiles[1]==l.raster->tiles[1]);}
+void blank_30000(){Layer l;l.id=newId();l.transform={0,0,30000,30000};Raster::resetMaterializationCount();GrowingBrushSession stroke(l,settings(),30000,30000);stroke.begin({15000,15000});auto first=stroke.preview();stroke.append({15010,15000});auto done=stroke.commit();auto bounds=done->sourceBounds();REQUIRE(bounds.width<30&&bounds.height<20&&bounds.x>14990&&bounds.y>14990);REQUIRE(first->pixel(15010,15000).a==0&&done->pixel(15010,15000).a>0);auto changed=done->materializeLayer();REQUIRE(changed.raster&&changed.raster->width==bounds.width&&changed.transform.x==bounds.x&&changed.transform.y==bounds.y);REQUIRE(stroke.metrics().sparsePixelTiles<=4&&Raster::materializationCount()==0);}
+void growth_padding_masks(){auto l=layer(64,64,{255,0,0,255});l.transform={100,100,64,64};auto mask=std::make_shared<GrayRaster>(GrayRaster{1,1,{0}});l.mask=Mask{mask};GrowingBrushSession stroke(l,settings(),512,512);stroke.begin({190,130});auto done=stroke.commit();auto bounds=done->sourceBounds();REQUIRE(bounds.x==0&&bounds.width>90&&bounds.width<100);REQUIRE(done->pixel(70,30)==Pixel{}&&done->pixel(90,30).b>0);auto changed=done->materializeLayer();REQUIRE(changed.mask->raster->pixel(10,10)==0&&changed.mask->raster->pixel(70,30)==255);REQUIRE(changed.raster->pixel(70,30)==Pixel{});l.mask->placement=Transform{20,30,64,64};l.mask->linked=false;GrowingBrushSession placed(l,settings(),512,512);placed.begin({90,130});auto moved=placed.commit()->materializeLayer();REQUIRE(moved.mask==l.mask&&moved.transform.x<100);auto point=moved.transform.fromUnit({(0-moved.transform.x+100)/moved.transform.width,.5});REQUIRE(std::abs(point.x-100)<1e-6);}
+void transformed_growth(){auto l=layer(64,64,{255,0,0,255});l.transform={100,100,128,96,30,true,true};auto s=settings();GrowingBrushSession stroke(l,s,512,512);auto point=l.transform.fromUnit({-.1,.5});stroke.begin(point);auto done=stroke.commit();auto bounds=done->sourceBounds();REQUIRE(bounds.x<0);auto changed=done->materializeLayer();auto before=l.transform.fromUnit({.3,.7}),after=changed.transform.fromUnit({(.3*64-bounds.x)/bounds.width,(.7*64-bounds.y)/bounds.height});REQUIRE(std::hypot(before.x-after.x,before.y-after.y)<1e-7);REQUIRE(done->pixel(-6,32).a>0);}
+void selection_cancel_mask(){auto l=layer(40,20);auto selection=std::make_shared<GrayRaster>(GrayRaster{40,20,std::vector<uint8_t>(800,0)});for(int y=0;y<20;++y)for(int x=0;x<20;++x)selection->pixels[size_t(y)*40+x]=255;GrowingBrushSession stroke(l,settings(),40,20,{},selection);stroke.begin({20,10});auto changed=stroke.preview();REQUIRE(changed->pixel(18,10).a>0&&changed->pixel(22,10).a==0);REQUIRE(stroke.cancel()->materializeLayer()==l&&stroke.metrics().sparsePixelTiles==0);l.mask=Mask{std::make_shared<GrayRaster>(GrayRaster{1,1,{255}})};auto s=settings();s.color={0,0,0};s.opacity=.5;GrowingBrushSession mask(l,s,40,20,{},selection,true);mask.begin({10,10});auto result=mask.commit()->materializeLayer();REQUIRE(result.raster==l.raster&&result.mask->raster->width==40&&result.mask->raster->height==20);REQUIRE(result.mask->raster->pixel(10,10)==128&&result.mask->raster->pixel(30,10)==255);}
+void atomic_budget(){auto l=layer(16,16);GrowingBrushSession stroke(l,settings(),30000,30000,{},{},false,100000);stroke.begin({10,10});auto snapshot=stroke.preview();bool rejected=false;try{stroke.append({29990,29990});}catch(const std::exception&){rejected=true;}REQUIRE(rejected&&stroke.preview()==snapshot);stroke.append({11,10});auto result=stroke.commit();REQUIRE(result->sourceBounds().width<100&&result->pixel(10,10).a>0);}
+void immutable_history(){Document d;d.id=newId();d.width=d.height=30000;Layer l;l.id=newId();l.transform={0,0,30000,30000};d.layers={l};std::optional<Document> current=d;History history;GrowingBrushSession stroke(l,settings(),30000,30000);stroke.begin({100,100});history.begin("Brush",current,l.id);current->layers[0]=stroke.commit()->materializeLayer();history.end(current,l.id);REQUIRE(history.undoCount()==1&&current->layers[0].raster);current=history.undo()->document;REQUIRE(current==d);current=history.redo()->document;REQUIRE(current->layers[0].raster);auto sampled=stroke.preview()->sample(95,95,10,10);REQUIRE(sampled->width==10&&sampled->pixel(5,5).a==255);}
+void gif_transparent_no_ghost(){
+    auto base=layer(360,360);auto other=Raster::filled(360,360,{30,30,30,255});
+    base.animation=GifAnimation{{{base.raster,1000},{other,1000}},0};
+    for(bool warp:{false,true}){
+        std::shared_ptr<D3D11BrushCoverage> gpu;
+        if(warp)gpu=std::make_shared<D3D11BrushCoverage>(std::filesystem::path(__FILE__).parent_path().parent_path().parent_path()/"shaders"/"BrushCoverage.hlsl",true);
+        auto brush=settings();brush.radius=12;GrowingBrushSession stroke(base,brush,360,360,gpu);
+        stroke.begin({190,180});stroke.append({210,190});
+        const auto preview=stroke.preview();REQUIRE(preview->changed()&&preview->pixel(0,0)==base.raster->pixel(0,0));
+        const auto render=preview->renderPreview();REQUIRE(render&&render->image);
+        REQUIRE(render->image({.5/360.,.5/360.},Transform::Sampling::Nearest)==base.raster->pixel(0,0));
+        const auto result=stroke.commit()->materializeLayer();
+        for(int y=0;y<80;++y)for(int x=0;x<80;++x)REQUIRE(result.raster->pixel(x,y)==base.raster->pixel(x,y));
+        REQUIRE(result.raster->pixel(200,185).a>0&&stroke.acceleratorError().empty());
+    }
+}
+void gif_growth_preserves_frames(){
+    for(size_t selected:{size_t(0),size_t(1)}){
+        auto base=layer(32,24,{100,0,0,255});
+        auto other=Raster::filled(32,24,{0,100,0,255});
+        base.animation=GifAnimation{{{base.raster,120},{other,240}},selected};
+        base.raster=base.animation->frames[selected].raster;
+        base.transform={120,100,64,48,30,true,false,Transform::Sampling::Nearest};
+        Document doc;doc.id=newId();doc.width=300;doc.height=300;doc.layers={base};
+        std::optional<Document> current=doc;History history;history.begin("Brush",current,base.id);
+        GrowingBrushSession stroke(base,settings(),300,300);
+        stroke.begin(base.transform.fromUnit({-.2,.5}));
+        const auto snapshot=stroke.commit();const auto bounds=snapshot->sourceBounds();
+        REQUIRE(bounds.x<0);
+        auto changed=snapshot->materializeLayer();
+        REQUIRE(changed.animation->frames[selected].raster==changed.raster);
+        const auto& untouched=*changed.animation->frames[1-selected].raster;
+        REQUIRE(untouched.width==bounds.width&&untouched.height==bounds.height);
+        REQUIRE(untouched.pixel(-bounds.x, -bounds.y)==base.animation->frames[1-selected].raster->pixel(0,0));
+        REQUIRE(untouched.pixel(0,-bounds.y)==Pixel{});
+        auto before=base.transform.fromUnit({.25,.75});
+        auto after=changed.transform.fromUnit({(.25*32-bounds.x)/bounds.width,(.75*24-bounds.y)/bounds.height});
+        REQUIRE(std::hypot(before.x-after.x,before.y-after.y)<1e-7);
+        current->layers[0]=changed;history.end(current,base.id);
+        REQUIRE(history.undo()->document==doc);
+        auto redone=history.redo()->document;
+        REQUIRE(redone->layers[0].animation==changed.animation&&redone->layers[0].transform==changed.transform);
+        GrowingBrushSession limited(base,settings(),300,300,{},{},false,100000000,{},uint64_t(32*24*2));
+        limited.begin(base.transform.fromUnit({-.2,.5}));
+        bool rejected=false;try{limited.commit()->materializeLayer();}catch(const std::runtime_error&){rejected=true;}
+        REQUIRE(rejected&&base.animation->frames[1-selected].raster==doc.layers[0].animation->frames[1-selected].raster);
+    }
+}
+void empty_erase_noop(){Layer blank;blank.id=newId();blank.transform={0,0,30000,30000};auto s=settings();s.erase=true;GrowingBrushSession stroke(blank,s,30000,30000);stroke.begin({100,100});REQUIRE(!stroke.commit()->changed()&&stroke.preview()->materializeLayer()==blank);auto l=layer(20,20,{10,20,30,255});GrowingBrushSession erase(l,s,20,20);erase.begin({10,10});auto done=erase.commit();REQUIRE(done->sourceBounds()==BrushSourceRect{0,0,20,20}&&done->pixel(10,10).a==0);}
+void gpu_equivalence(){auto shader=std::filesystem::path(__FILE__).parent_path().parent_path().parent_path()/"shaders"/"BrushCoverage.hlsl";auto gpu=std::make_shared<D3D11BrushCoverage>(shader,true);std::cout<<"BACKEND "<<gpu->adapterName()<<'\n';auto original=layer(520,360,{10,20,30,64});original.transform={100,100,520,360};auto s=settings();s.radius=27;s.hardness=.3;s.opacity=.47;GrowingBrushSession cpu(original,s,800,600),warp(original,s,800,600,gpu);cpu.begin({70,140});warp.begin({70,140});for(Point p:{Point{40,260},{240,220},{470,410},{680,300}}){cpu.append(p);warp.append(p);}auto a=cpu.commit(),b=warp.commit();REQUIRE(a->sourceBounds()==b->sourceBounds()&&a->transform()==b->transform());auto bounds=a->sourceBounds();int maximumError=0;for(int y=bounds.y;y<bounds.y+bounds.height;++y)for(int x=bounds.x;x<bounds.x+bounds.width;++x){auto p=a->pixel(x,y),q=b->pixel(x,y);for(auto error:{std::abs(int(p.r)-q.r),std::abs(int(p.g)-q.g),std::abs(int(p.b)-q.b),std::abs(int(p.a)-q.a)})maximumError=std::max(maximumError,error);}std::cout<<"MAX_BYTE_ERROR "<<maximumError<<'\n';REQUIRE(maximumError<=1&&warp.acceleratorError().empty()&&warp.metrics().coverage.acceleratorFallbacks==0);}
+void invalid_sample(){Layer l;l.id=newId();l.transform={0,0,100,100};GrowingBrushSession stroke(l,settings(),100,100);int rejected=0;for(int value:{std::numeric_limits<int>::min(),std::numeric_limits<int>::max()})try{stroke.preview()->pixel(value,0);}catch(const std::exception&){++rejected;}try{stroke.preview()->sample(0,0,30000,30000);}catch(const std::exception&){++rejected;}REQUIRE(rejected==3);}
+Pixel visible(const Layer& l,Point p){if(!l.raster)return {};auto value=sampleRaster(*l.raster,l.transform.toUnit(p),l.transform.sampling);double mask=1;if(l.mask&&l.mask->enabled){auto placement=l.mask->placement.value_or(l.transform);mask=sampleMask(*l.mask->raster,placement.toUnit(p),placement.sampling,l.mask->placement?l.mask->previewExterior.value_or(cachedMaskBackground(l.mask->raster)):0);}auto b=[&](uint8_t v){return uint8_t(std::floor(v*mask+.5));};return {b(value.r),b(value.g),b(value.b),b(value.a)};}
+void viewport_image(){auto l=layer(4000,4000,{64,64,64,128});l.transform={500,500,4000,4000};l.mask=Mask{std::make_shared<GrayRaster>(GrayRaster{1,1,{128}})};GrowingBrushSession stroke(l,settings(),5000,5000);stroke.begin({490,1000});auto snapshot=stroke.preview();auto metrics=stroke.metrics();auto view=snapshot->previewLayer(450,900,256,192);auto after=stroke.metrics();REQUIRE(view.raster->width<300&&view.raster->height<200&&after.materializedTiles-metrics.materializedTiles<=4);REQUIRE(view.mask->raster->pixels.size()<60000);auto full=snapshot->materializeLayer();for(int y=900;y<1092;++y)for(int x=450;x<706;++x)REQUIRE(visible(view,{x+.5,y+.5})==visible(full,{x+.5,y+.5}));auto fit=snapshot->previewLayer(0,0,5000,5000,262144);REQUIRE(uint64_t(fit.raster->width)*fit.raster->height<=262144&&fit.transform==full.transform);auto away=snapshot->previewLayer(0,0,10,10);REQUIRE(!away.raster);}
+void viewport_transformed(){for(double rotation:{0.,37.,90.}){auto l=layer(40,20,{255,0,0,255});l.transform={240,80,80,40,rotation,true,false,Transform::Sampling::Nearest};l.mask=Mask{std::make_shared<GrayRaster>(GrayRaster{1,1,{128}})};auto s=settings();s.radius=8;s.color={0,255,0};GrowingBrushSession stroke(l,s,600,200);stroke.begin({12,12});stroke.append({580,12});auto snapshot=stroke.commit();auto full=snapshot->materializeLayer();auto view=snapshot->previewLayer(0,0,600,120);for(int y=0;y<120;++y)for(int x=0;x<600;++x)REQUIRE(visible(view,{x+.5,y+.5})==visible(full,{x+.5,y+.5}));REQUIRE(visible(view,{12.5,12.5}).g>240&&visible(view,{580.5,12.5}).g>240);REQUIRE(std::abs(int(visible(view,{280.5,100.5}).a)-128)<=1);}}
+void viewport_mask(){for(bool folder:{false,true}){auto l=layer(700,300,{0,255,0,255});l.mask=Mask{std::make_shared<GrayRaster>(GrayRaster{400,100,std::vector<uint8_t>(40000,255)})};l.mask->placement=Transform{100,100,400,100};Layer child;if(folder){l.raster.reset();l.group=true;l.transform=*l.mask->placement;l.mask->placement.reset();child=layer(700,300,{0,255,0,255});child.parentId=l.id;}auto s=settings();s.radius=60;s.color={0,0,0};GrowingBrushSession stroke(l,s,700,300,{},{},true);stroke.begin({120,150});auto snapshot=stroke.commit();auto full=snapshot->materializeLayer(),view=snapshot->previewLayer(50,110,130,80,20000);REQUIRE(view.raster==l.raster&&view.mask->raster->pixels.size()<=20000&&!full.mask->previewExterior);if(!folder){REQUIRE(view.mask->previewExterior==255&&cachedMaskBackground(view.mask->raster)==0&&cachedMaskBackground(full.mask->raster)==255);}Document a;a.width=700;a.height=300;a.layers={full};if(folder)a.layers.push_back(child);auto b=a;b.layers[0]=view;auto first=StackRenderer().render(a,50,110,130,80),second=StackRenderer().render(b,50,110,130,80);for(int y=0;y<80;++y)for(int x=0;x<130;++x)REQUIRE(first->pixel(x,y)==second->pixel(x,y));auto away=snapshot->previewLayer(0,0,10,10,16);b.layers[0]=away;auto far=StackRenderer().render(b,0,0,10,10);REQUIRE(far->pixel(0,0).a==(folder?0:255));}}
+void region_row_copies(){auto l=layer(521,317);std::vector<uint8_t> bytes(size_t(521)*317*4);for(int y=0;y<317;++y)for(int x=0;x<521;++x){auto i=(size_t(y)*521+x)*4;bytes[i]=uint8_t(x%256);bytes[i+1]=uint8_t(y%256);bytes[i+2]=uint8_t((x+y)%256);bytes[i+3]=255;}l.raster=Raster::fromRgba(521,317,bytes.data(),521*4);l.transform={27,39,521,317};GrowingBrushSession stroke(l,settings(),600,400);stroke.begin({20,200});auto snapshot=stroke.commit();auto region=snapshot->sample(-11,-5,545,329);for(int y=0;y<329;++y)for(int x=0;x<545;++x)REQUIRE(region->pixel(x,y)==snapshot->pixel(x-11,y-5));auto full=snapshot->materializeLayer();auto bounds=snapshot->sourceBounds();for(int y=0;y<bounds.height;++y)for(int x=0;x<bounds.width;++x)REQUIRE(full.raster->pixel(x,y)==snapshot->pixel(bounds.x+x,bounds.y+y));}
+void small_source_growth(){std::cout<<std::unitbuf;for(bool warp:{false,true}){std::cout<<"STAGE backend "<<warp<<'\n';std::shared_ptr<D3D11BrushCoverage> gpu;if(warp)gpu=std::make_shared<D3D11BrushCoverage>(std::filesystem::path(__FILE__).parent_path().parent_path().parent_path()/"shaders"/"BrushCoverage.hlsl",true);auto l=layer(32,32,{180,80,20,255});l.transform={40,30,32,32};Document d;d.width=128;d.height=96;d.layers={l};std::cout<<"STAGE before render\n";auto before=StackRenderer().render(d,0,0,128,96);GrowingBrushSession stroke(l,{},128,96,gpu);std::cout<<"STAGE begin\n";stroke.begin({20,45});std::cout<<"STAGE first viewport\n";auto view=stroke.preview()->previewLayer(0,0,128,96);std::cout<<"STAGE append\n";stroke.append({22,45});std::cout<<"STAGE second viewport\n";view=stroke.preview()->previewLayer(0,0,128,96);std::cout<<"STAGE commit\n";d.layers[0]=stroke.commit()->materializeLayer();std::cout<<"STAGE after render\n";auto after=StackRenderer().render(d,0,0,128,96);REQUIRE(d.layers[0].transform.x<40&&d.layers[0].raster->width>32&&after->pixel(60,45)==before->pixel(60,45)&&after->pixel(20,45).a>0);}}
+void benchmark(){using Clock=std::chrono::steady_clock;bool failed=false;for(bool large:{false,true}){std::vector<double> sparse,bridge;uint64_t retiled=0,reused=0;for(int pass=0;pass<2;++pass){Layer l;if(large){l=layer(4000,4000,{64,64,64,128});l.transform.x=500;l.transform.y=500;}else{l.id=newId();l.transform={0,0,30000,30000};}auto s=settings();s.radius=large?10:5;s.hardness=large?.4:1;GrowingBrushSession stroke(l,s,large?5000:30000,large?5000:30000);Layer preview;for(int event=0;event<24;++event){Point point=large?Point{490-double(event%3),1000+event*2.}:Point{15000+event*2.,15000};auto start=Clock::now();if(event==0)stroke.begin(point);else stroke.append(point);auto snapshot=stroke.preview();auto middle=Clock::now();preview=snapshot->materializeLayer();auto finish=Clock::now();sparse.push_back(std::chrono::duration<double,std::milli>(middle-start).count());bridge.push_back(std::chrono::duration<double,std::milli>(finish-start).count());}auto m=stroke.metrics();retiled+=m.materializedTiles;reused+=m.reusedTiles;}std::sort(sparse.begin(),sparse.end());std::sort(bridge.begin(),bridge.end());size_t p95=size_t(std::ceil(.95*sparse.size()))-1;bool sparsePass=sparse[p95]<=16.7,bridgePass=bridge[p95]<=16.7;failed|=!sparsePass||!bridgePass;std::cout<<"{\"workload\":\""<<(large?"4000_unaligned_expansion":"30000_blank_tiny")<<"\",\"backend\":\"CPU\",\"events\":48,\"gate_ms\":16.7,\"sparse_p50_ms\":"<<sparse[24]<<",\"sparse_p95_ms\":"<<sparse[p95]<<",\"bridge_p50_ms\":"<<bridge[24]<<",\"bridge_p95_ms\":"<<bridge[p95]<<",\"sparse_pass\":"<<(sparsePass?"true":"false")<<",\"bridge_pass\":"<<(bridgePass?"true":"false")<<",\"materialized_tiles\":"<<retiled<<",\"reused_tiles\":"<<reused<<"}"<<std::endl;}if(failed)throw std::runtime_error("Fixed growing brush performance gate failed; retained as failure");}
+void benchmarkViewport(std::shared_ptr<D3D11BrushCoverage> gpu,const char* backend){
+    using Clock=std::chrono::steady_clock;bool failed=false;
+    for(bool large:{false,true}){
+        std::vector<double> times,commits;size_t maxViewportPixels=0,maxSparseBytes=0,maxCoverageBytes=0;uint64_t viewportTiles=0;
+        Raster::resetMaterializationCount();
+        for(int pass=0;pass<2;++pass){
+            Layer l;if(large){l=layer(4000,4000,{64,64,64,128});l.transform.x=500;l.transform.y=500;}else{l.id=newId();l.transform={0,0,30000,30000};}
+            auto s=settings();s.radius=large?10:5;s.hardness=large?.4:1;
+            GrowingBrushSession stroke(l,s,large?5000:30000,large?5000:30000,gpu);Layer preview;
+            for(int event=0;event<24;++event){
+                Point point=large?Point{490-double(event%3),1000+event*2.}:Point{15000+event*2.,15000};
+                auto start=Clock::now();if(event==0)stroke.begin(point);else stroke.append(point);
+                preview=stroke.preview()->previewLayer(large?450:14900,large?900:14900,256,192);
+                times.push_back(std::chrono::duration<double,std::milli>(Clock::now()-start).count());
+                maxViewportPixels=std::max(maxViewportPixels,size_t(preview.raster->width)*preview.raster->height);
+                auto metrics=stroke.metrics();maxSparseBytes=std::max(maxSparseBytes,metrics.sparsePixelBytes);maxCoverageBytes=std::max(maxCoverageBytes,metrics.coverage.coverageStorageBytes);
+            }
+            viewportTiles+=stroke.metrics().materializedTiles;
+            auto start=Clock::now();preview=stroke.commit()->materializeLayer();commits.push_back(std::chrono::duration<double,std::milli>(Clock::now()-start).count());
+            REQUIRE(stroke.acceleratorError().empty()&&stroke.metrics().coverage.acceleratorFallbacks==0&&Raster::materializationCount()==0);
+        }
+        auto ordered=times;std::sort(ordered.begin(),ordered.end());size_t index=size_t(std::ceil(.95*ordered.size()))-1;bool passed=ordered[index]<=16.7;failed|=!passed;
+        std::cout<<"{\"workload\":\""<<(large?"4000_unaligned_expansion":"30000_blank_tiny")<<"\",\"backend\":\""<<backend<<"\",\"events\":48,\"gate_ms\":16.7,\"viewport_p50_ms\":"<<ordered[24]<<",\"viewport_p95_ms\":"<<ordered[index]<<",\"viewport_pass\":"<<(passed?"true":"false")<<",\"max_viewport_pixels\":"<<maxViewportPixels<<",\"viewport_materialized_tiles\":"<<viewportTiles<<",\"max_sparse_pixel_bytes\":"<<maxSparseBytes<<",\"max_coverage_bytes\":"<<maxCoverageBytes<<",\"full_rgba_materializations\":"<<Raster::materializationCount()<<",\"includes_compositor_or_UI_present\":false,\"commit_ms\":["<<commits[0]<<','<<commits[1]<<"],\"event_ms\":[";
+        for(size_t i=0;i<times.size();++i){if(i)std::cout<<',';std::cout<<times[i];}std::cout<<"]}"<<std::endl;
+    }
+    if(failed)throw std::runtime_error("Fixed growing brush viewport performance gate failed; retained as failure");
+}
+void viewport_benchmark_cpu(){benchmarkViewport({},"CPU");}
+void viewport_benchmark_warp(){auto shader=std::filesystem::path(__FILE__).parent_path().parent_path().parent_path()/"shaders"/"BrushCoverage.hlsl";auto gpu=std::make_shared<D3D11BrushCoverage>(shader,true);std::cout<<"BACKEND "<<gpu->adapterName()<<'\n';benchmarkViewport(gpu,"WARP");}
+int main(int argc,char** argv){std::map<std::string,void(*)()> tests{{"deep_brush",deep_brush},{"pen_pressure",pen_pressure},{"unchanged_grid",unchanged_grid},{"blank_30000",blank_30000},{"growth_padding_masks",growth_padding_masks},{"transformed_growth",transformed_growth},{"selection_cancel_mask",selection_cancel_mask},{"atomic_budget",atomic_budget},{"immutable_history",immutable_history},{"gif_transparent_no_ghost",gif_transparent_no_ghost},{"gif_growth_preserves_frames",gif_growth_preserves_frames},{"empty_erase_noop",empty_erase_noop},{"gpu_equivalence",gpu_equivalence},{"invalid_sample",invalid_sample},{"viewport_image",viewport_image},{"viewport_transformed",viewport_transformed},{"viewport_mask",viewport_mask},{"region_row_copies",region_row_copies},{"small_source_growth",small_source_growth},{"benchmark",benchmark},{"viewport_benchmark_cpu",viewport_benchmark_cpu},{"viewport_benchmark_warp",viewport_benchmark_warp}};try{if(argc!=2||!tests.contains(argv[1]))throw std::runtime_error("Specify growing brush check");tests.at(argv[1])();std::cout<<"PASS "<<argv[1]<<"\n";return 0;}catch(const std::exception& error){std::cerr<<"FAIL "<<error.what()<<"\n";return 1;}}

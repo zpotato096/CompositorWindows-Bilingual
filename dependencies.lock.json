@@ -1,0 +1,56 @@
+{
+  "qt": {
+    "url": "https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/qt6_683/qt6_683/qt.qt6.683.win64_msvc2022_64/6.8.3-0-202503201308qtbase-Windows-Windows_11_23H2-MSVC2022-Windows-Windows_11_23H2-X86_64.7z",
+    "kit": "msvc2022_64",
+    "modules": [
+      "qtbase"
+    ],
+    "sha256": "41688269FAC0565DB956C66D9EECAE777D16197E0C02CD81B88640C1F5D73D3F",
+    "official_sha1": "ab0bd2551618f7128ef30c6d74fe45b6a76e2296",
+    "license": "LGPL-3.0-only or GPL-2.0-only or GPL-3.0-only or commercial (module-specific)",
+    "version": "6.8.3",
+    "source": {
+      "url": "https://download.qt.io/archive/qt/6.8/6.8.3/submodules/qtbase-everywhere-src-6.8.3.tar.xz",
+      "sha256": "56001b905601bb9023d399f3ba780d7fa940f3e4861e496a7c490331f49e0b80",
+      "path": "dependencies/downloads/qtbase-everywhere-src-6.8.3.tar.xz"
+    }
+  },
+  "schema": 1,
+  "upstream": "a19db9011282399785dc18efcfded904627bdcc2",
+  "toolchain": {
+    "architecture": "x64",
+    "windows_sdk": "10.0.26100.0",
+    "cmake": "3.31.6-msvc6",
+    "msvc": "14.44.35207"
+  },
+  "hdr": {
+    "openexr": {
+      "version": "3.3.5",
+      "commit": "6661cb40c6fa8d332f142e660e25ac96675c15bd",
+      "license": "BSD-3-Clause",
+      "url": "https://github.com/AcademySoftwareFoundation/openexr/archive/6661cb40c6fa8d332f142e660e25ac96675c15bd.tar.gz",
+      "sha256": "6438c34123ab378f9b1aa98909ed5e65f4898fac7689ea736800ddb641b7cdfa"
+    },
+    "imath": {
+      "version": "3.1.12",
+      "commit": "c0396a055a01bc537d32f435aee11a9b7ed6f0b5",
+      "license": "BSD-3-Clause",
+      "url": "https://github.com/AcademySoftwareFoundation/Imath/archive/c0396a055a01bc537d32f435aee11a9b7ed6f0b5.tar.gz",
+      "sha256": "adb799567cd7b6a505deedb8f8f653b07c12ed2c38c6bdadded4da0b32cc2abf"
+    },
+    "libdeflate": {
+      "version": "1.18",
+      "commit": "495fee110ebb48a5eb63b75fd67e42b2955871e2",
+      "license": "MIT",
+      "url": "https://github.com/ebiggers/libdeflate/archive/495fee110ebb48a5eb63b75fd67e42b2955871e2.tar.gz",
+      "sha256": "4182481e6b1a1ebe00ae076d4eddb6978d9153749a6f4f3c2914770b5ffc8956"
+    },
+    "stb_image": {
+      "commit": "003501f6d7a8668ce8b6d875e34dd97ad0d5d5b5",
+      "path": "src/imaging/third_party/stb_image.h",
+      "license": "MIT (dual-licensed public domain)",
+      "url": "https://github.com/nothings/stb",
+      "sha256": "b00dffc0175fbf1c6174a5c31e30be5721cb3f764f19429a8e9b0d1027920884"
+    }
+  }
+}

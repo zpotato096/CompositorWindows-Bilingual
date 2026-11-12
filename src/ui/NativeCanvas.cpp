@@ -1,0 +1,848 @@
+#include "NativeCanvas.h"
+#include "CanvasAccessibility.h"
+#include <QGuiApplication>
+#include <QMouseEvent>
+#include <QWheelEvent>
+#include <QKeyEvent>
+#include <QTabletEvent>
+#include <QNativeGestureEvent>
+#include <QPaintEngine>
+#include <QImage>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <stdexcept>
+#include <vector>
+#include <d2d1_1helper.h>
+#include <dwrite.h>
+#include <QString>
+
+namespace compositor {
+using Microsoft::WRL::ComPtr;
+static void check(HRESULT result,const char*message){if(FAILED(result))throw std::runtime_error(std::string(message)+" (HRESULT "+std::to_string(uint32_t(result))+")");}
+namespace {
+double niceRulerStep(double raw){
+    if(!(raw>0)||!std::isfinite(raw))return 1;
+    const double magnitude=std::pow(10,std::floor(std::log10(raw)));
+    const double fraction=raw/magnitude;
+    const double nice=fraction<1.5?1:fraction<3.5?2:fraction<7.5?5:10;
+    return nice*magnitude;
+}
+QString rulerLabel(double value){
+    const bool whole=std::abs(value-std::round(value))<1e-3;
+    return QString::number(whole?std::round(value):value,'f',whole?0:1);
+}
+IDWriteTextFormat* rulerTextFormat(){
+    static ComPtr<IDWriteFactory> factory;
+    static ComPtr<IDWriteTextFormat> format;
+    if(!format){
+        check(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,__uuidof(IDWriteFactory),reinterpret_cast<IUnknown**>(factory.GetAddressOf())),"Ruler text factory");
+        check(factory->CreateTextFormat(L"Segoe UI",nullptr,DWRITE_FONT_WEIGHT_NORMAL,DWRITE_FONT_STYLE_NORMAL,DWRITE_FONT_STRETCH_NORMAL,8.f,L"en-us",&format),"Ruler text format");
+        format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    }
+    return format.Get();
+}
+}
+NativeCanvas::NativeCanvas(bool warp,QWidget*parent):QWidget(parent),warp_(warp){ui::installCanvasAccessibility();setAttribute(Qt::WA_NativeWindow);setAttribute(Qt::WA_PaintOnScreen);setAttribute(Qt::WA_NoSystemBackground);setFocusPolicy(Qt::StrongFocus);setMouseTracking(true);setAccessibleName("Image canvas");setMinimumSize(160,120);selectionTimer_=new QTimer(this);selectionTimer_->setObjectName("selectionAntsTimer");selectionTimer_->setTimerType(Qt::PreciseTimer);selectionTimer_->setInterval(120);connect(selectionTimer_,&QTimer::timeout,this,[this]{selectionPhase_=(selectionPhase_+1)%8;update();});navigatorTimer_=new QTimer(this);navigatorTimer_->setObjectName("navigatorTimer");navigatorTimer_->setSingleShot(true);navigatorTimer_->setInterval(300);connect(navigatorTimer_,&QTimer::timeout,this,[this]{refreshNavigator();});synchronizeViewport();}
+NativeCanvas::~NativeCanvas(){shutdownCmykProof();selectionTimer_->stop();navigatorTimer_->stop();if(viewportTimer_)viewportTimer_->stop();profileWatcher_.reset();if(profileWindow_)profileWindow_->removeEventFilter(this);QObject::disconnect(profileScreenConnection_);releaseDevice();}
+void NativeCanvas::releaseDevice(){checkerBrush_.Reset();checkerScale_=0;selectionGeometry_.Reset();selectionMatrix_.reset();brushPreviewBitmap_.Reset();brushPreviewSource_.reset();textBitmap_.Reset();textRasterSource_.reset();navigatorBitmap_.Reset();resetPresentationResources();displayTiles_.clear();image_.Reset();target_.Reset();if(context_)context_->SetTarget(nullptr);context_.Reset();d2device_.Reset();factory_.Reset();swap_.Reset();immediate_.Reset();device_.Reset();}
+void NativeCanvas::ensureChecker(){
+    const float scale=float(devicePixelRatioF());if(checkerBrush_&&checkerScale_==scale)return;
+    checkerBrush_.Reset();checkerScale_=scale;
+    const int cell=std::max(1,int(std::lround(12*scale))),side=cell*2;
+    std::vector<uint32_t> pixels(size_t(side)*side);
+    auto channel=[](float value){return uint32_t(std::clamp(std::lround(value*255),0L,255L));};
+    auto bgra=[&](float r,float g,float b){return channel(b)|(channel(g)<<8)|(channel(r)<<16)|(255u<<24);};
+    const uint32_t dark=bgra(.77f,.78f,.79f),light=bgra(.91f,.92f,.93f);
+    for(int y=0;y<side;++y)for(int x=0;x<side;++x)pixels[size_t(y)*side+x]=((x/cell+y/cell)%2)?dark:light;
+    const float dpi=96*scale;
+    auto props=D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE,D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_IGNORE),dpi,dpi);
+    ComPtr<ID2D1Bitmap1> bitmap;check(context_->CreateBitmap(D2D1::SizeU(UINT32(side),UINT32(side)),pixels.data(),UINT32(side*4),&props,&bitmap),"Checker bitmap");
+    auto brushProps=D2D1::BitmapBrushProperties1(D2D1_EXTEND_MODE_WRAP,D2D1_EXTEND_MODE_WRAP,D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+    check(context_->CreateBitmapBrush(bitmap.Get(),brushProps,D2D1::BrushProperties(),checkerBrush_.GetAddressOf()),"Checker brush");
+}
+void NativeCanvas::createDevice(){UINT flags=D3D11_CREATE_DEVICE_BGRA_SUPPORT;D3D_FEATURE_LEVEL level{};auto hr=D3D11CreateDevice(nullptr,warp_?D3D_DRIVER_TYPE_WARP:D3D_DRIVER_TYPE_HARDWARE,nullptr,flags,nullptr,0,D3D11_SDK_VERSION,&device_,&level,&immediate_);if(FAILED(hr)&&!warp_)hr=D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,flags,nullptr,0,D3D11_SDK_VERSION,&device_,&level,&immediate_);check(hr,"D3D11 device");ComPtr<IDXGIDevice> dxgi;check(device_.As(&dxgi),"DXGI device");ComPtr<IDXGIAdapter> adapter;check(dxgi->GetAdapter(&adapter),"DXGI adapter");ComPtr<IDXGIFactory2> dxgiFactory;check(adapter->GetParent(IID_PPV_ARGS(&dxgiFactory)),"DXGI factory");DXGI_SWAP_CHAIN_DESC1 desc{};desc.Width=std::max(1,int(width()*devicePixelRatioF()));desc.Height=std::max(1,int(height()*devicePixelRatioF()));desc.Format=DXGI_FORMAT_B8G8R8A8_UNORM;desc.SampleDesc.Count=1;desc.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;desc.BufferCount=2;desc.SwapEffect=DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;desc.Scaling=DXGI_SCALING_STRETCH;desc.AlphaMode=DXGI_ALPHA_MODE_IGNORE;check(dxgiFactory->CreateSwapChainForHwnd(device_.Get(),reinterpret_cast<HWND>(winId()),&desc,nullptr,nullptr,&swap_),"Canvas swap chain");dxgiFactory->MakeWindowAssociation(reinterpret_cast<HWND>(winId()),DXGI_MWA_NO_ALT_ENTER);check(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,IID_PPV_ARGS(&factory_)),"D2D factory");check(factory_->CreateDevice(dxgi.Get(),&d2device_),"D2D device");check(d2device_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE,&context_),"D2D context");createTarget();upload();}
+void NativeCanvas::createTarget(){resetPresentationResources();ComPtr<IDXGISurface> surface;check(swap_->GetBuffer(0,IID_PPV_ARGS(&surface)),"Canvas surface");float dpi=float(96*devicePixelRatioF());auto props=D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET|D2D1_BITMAP_OPTIONS_CANNOT_DRAW,D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_IGNORE),dpi,dpi);check(context_->CreateBitmapFromDxgiSurface(surface.Get(),&props,&target_),"Canvas render target");context_->SetTarget(target_.Get());context_->SetDpi(dpi,dpi);}
+void NativeCanvas::upload(){
+    image_.Reset();
+    if(!raster_){displayTiles_.clear();return;}
+    std::unordered_map<const Raster::Tile*,bool> live;
+    for(const auto&tile:raster_->tiles)live[tile.get()]=true;
+    std::erase_if(displayTiles_,[&](const auto&entry){return !live.contains(entry.first);});
+}
+void NativeCanvas::drawRasterTiles(const Raster& image,double docX,double docY,double units,float left,float top,double scale){
+    if(!context_||units<=0)return;
+    for(int ty=0;ty<image.height;ty+=256)for(int tx=0;tx<image.width;tx+=256){int tw=std::min(256,image.width-tx),th=std::min(256,image.height-ty);auto rect=D2D1::RectF(left+float((docX+tx*units)*scale),top+float((docY+ty*units)*scale),left+float((docX+(tx+tw)*units)*scale),top+float((docY+(ty+th)*units)*scale));if(rect.right<0||rect.bottom<0||rect.left>width()||rect.top>height())continue;const size_t index=size_t(ty/256)*((image.width+255)/256)+size_t(tx/256);if(index>=image.tiles.size()||!image.tiles[index])continue;auto tile=image.tiles[index];auto found=displayTiles_.find(tile.get());
+    if(found==displayTiles_.end()){if(displayTiles_.size()>=1024)displayTiles_.erase(displayTiles_.begin());DisplayTile display;display.source=tile;auto props=D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE,D2D1::PixelFormat(DXGI_FORMAT_R8G8B8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED));check(context_->CreateBitmap(D2D1::SizeU(256,256),tile->pixels.data(),256*4,&props,&display.bitmap),"Canvas tile upload");found=displayTiles_.emplace(tile.get(),std::move(display)).first;}
+    context_->DrawBitmap(found->second.bitmap.Get(),rect,1,D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,D2D1::RectF(0,0,float(tw),float(th)));}
+}
+void NativeCanvas::drawMoveSprite(double scale){
+    if(!context_||!movePreview_||!movePreview_->layer||movePreview_->layer->width<1||movePreview_->layer->height<1||scale<=0)return;
+    const auto& image=*movePreview_->layer;const auto& placed=movePreview_->placed;if(!placed.valid())return;
+    const auto mapping=viewMapping();auto viewOf=[&](Point point){auto view=mapping.toView(point);return D2D1::Point2F(float(view.x),float(view.y));};
+    const auto origin=viewOf(placed.fromUnit({0,0})),axisX=viewOf(placed.fromUnit({1,0})),axisY=viewOf(placed.fromUnit({0,1}));
+    const float width=float(image.width),height=float(image.height);if(width<=0||height<=0)return;
+    D2D1_MATRIX_3X2_F previous{};context_->GetTransform(&previous);
+    context_->SetTransform(D2D1::Matrix3x2F((axisX.x-origin.x)/width,(axisX.y-origin.y)/width,(axisY.x-origin.x)/height,(axisY.y-origin.y)/height,origin.x,origin.y));
+    for(int ty=0;ty<image.height;ty+=256)for(int tx=0;tx<image.width;tx+=256){int tw=std::min(256,image.width-tx),th=std::min(256,image.height-ty);const size_t index=size_t(ty/256)*((image.width+255)/256)+size_t(tx/256);if(index>=image.tiles.size()||!image.tiles[index])continue;auto tile=image.tiles[index];auto found=displayTiles_.find(tile.get());
+        if(found==displayTiles_.end()){if(displayTiles_.size()>=1024)displayTiles_.erase(displayTiles_.begin());DisplayTile display;display.source=tile;auto props=D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE,D2D1::PixelFormat(DXGI_FORMAT_R8G8B8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED));check(context_->CreateBitmap(D2D1::SizeU(256,256),tile->pixels.data(),256*4,&props,&display.bitmap),"Move preview tile");found=displayTiles_.emplace(tile.get(),std::move(display)).first;}
+        // tx and ty are source-pixel offsets, already advanced by one tile.
+        // Multiplying them by 256 again sends every tile but the first
+        // outside the layer; the placement matrix supplies the view transform.
+        context_->DrawBitmap(found->second.bitmap.Get(),D2D1::RectF(float(tx),float(ty),float(tx+tw),float(ty+th)),float(std::clamp(movePreview_->opacity,0.,1.)),D2D1_INTERPOLATION_MODE_LINEAR,D2D1::RectF(0,0,float(tw),float(th)));}
+    context_->SetTransform(previous);
+}
+void NativeCanvas::setMovePreview(MovePreview preview){if(preview.baseUnits<=0)preview.baseUnits=1;movePreview_=std::move(preview);update();}
+void NativeCanvas::setMovePreviewPlacement(Transform placed){if(!movePreview_)return;movePreview_->placed=placed;update();}
+bool NativeCanvas::previewMatches(const std::string& layerId,uint64_t gesture) const{return movePreview_&&movePreview_->layerId==layerId&&movePreview_->gesture==gesture;}
+std::optional<NativeCanvas::PreviewPlate> NativeCanvas::previewPlate() const{if(!movePreview_||!movePreview_->plate)return {};return PreviewPlate{movePreview_->plateX,movePreview_->plateY,movePreview_->plate->width,movePreview_->plate->height};}
+void NativeCanvas::clearMovePreview(){if(!movePreview_)return;movePreview_.reset();update();}
+void NativeCanvas::setCompositeHeld(bool held){compositeHeld_=held;}
+NativeCanvas::ViewportBounds NativeCanvas::viewportBounds() const{
+    ViewportBounds result;if(documentWidth_<=0||documentHeight_<=0)return result;const double scale=pointsPerPixel();if(!(scale>0)||!std::isfinite(scale))return result;
+    const auto frame=contentRect();const QPointF origin=documentPoint(frame.topLeft());const bool crisp=zoom>=2;
+    result.x=crisp?std::floor(origin.x()):origin.x();result.y=crisp?std::floor(origin.y()):origin.y();
+    result.width=crisp?std::ceil(origin.x()+frame.width()/scale)-result.x:frame.width()/scale;result.height=crisp?std::ceil(origin.y()+frame.height()/scale)-result.y:frame.height()/scale;
+    result.units=crisp?1.:1./zoom;result.valid=std::isfinite(result.x)&&std::isfinite(result.y)&&std::isfinite(result.width)&&std::isfinite(result.height)&&result.width>=0&&result.height>=0&&std::isfinite(result.units)&&result.units>0;return result;
+}
+void NativeCanvas::presentComposite(std::shared_ptr<const Raster> raster,double x,double y,double units,bool clearPreview){
+    // The deferred provider keeps this frame during painting. Once it is
+    // removed or disabled, the next paint should draw the canonical document.
+    raster_=std::move(raster);rasterX_=x;rasterY_=y;rasterUnits_=units>0?units:1;viewportPresented_=!deferViewportComposite;if(clearPreview)movePreview_.reset();upload();update();
+}
+QRectF NativeCanvas::contentRect() const{
+    if(!showRulers||documentWidth_<=0||documentHeight_<=0)return QRectF(0,0,width(),height());
+    return QRectF(rulerThickness,rulerThickness,std::max(0.,double(width())-rulerThickness),std::max(0.,double(height())-rulerThickness));
+}
+void NativeCanvas::setRulersVisible(bool visible){
+    if(showRulers==visible)return;
+    if(!visible&&guideDrag_)cancelGuideDrag();
+    showRulers=visible;
+    synchronizeViewport();
+}
+double NativeCanvas::rulerMajorInterval() const{
+    const double scale=pointsPerPixel();
+    if(!(scale>0)||!std::isfinite(scale))return 1;
+    return niceRulerStep(72./scale);
+}
+std::optional<NativeCanvas::GuidePreview> NativeCanvas::guidePreview() const{
+    if(!guideDrag_)return {};
+    return GuidePreview{guideDrag_->horizontal,guideDrag_->position,guideDrag_->index};
+}
+NativeCanvas::RulerBand NativeCanvas::rulerBandAt(QPointF view) const{
+    if(!showRulers||documentWidth_<=0||documentHeight_<=0)return RulerBand::None;
+    const bool horizontal=view.y()>=0&&view.y()<rulerThickness&&view.x()>=rulerThickness&&view.x()<width();
+    const bool vertical=view.x()>=0&&view.x()<rulerThickness&&view.y()>=rulerThickness&&view.y()<height();
+    if(horizontal)return RulerBand::Horizontal;
+    if(vertical)return RulerBand::Vertical;
+    return RulerBand::None;
+}
+std::optional<int> NativeCanvas::guideIndexAt(QPointF view) const{
+    if(!showGuides||documentWidth_<=0||rulerBandAt(view)!=RulerBand::None)return {};
+    const auto mapping=viewMapping();
+    constexpr double slop=5;
+    int best=-1;double bestDistance=slop;
+    for(int index=0;index<int(guides.size());++index){
+        const bool horizontal=guides[size_t(index)].first;
+        const double position=guides[size_t(index)].second;
+        const auto at=mapping.toView(horizontal?Point{0,position}:Point{position,0});
+        const double distance=horizontal?std::abs(view.y()-at.y):std::abs(view.x()-at.x);
+        if(distance<=bestDistance){best=index;bestDistance=distance;}
+    }
+    if(best<0)return {};
+    return best;
+}
+bool NativeCanvas::beginGuideDrag(QPointF view){
+    if(documentWidth_<=0||documentHeight_<=0||guideDrag_)return false;
+    const auto band=rulerBandAt(view);
+    int index=-1;bool horizontal=false;
+    if(band==RulerBand::Horizontal)horizontal=true;
+    else if(band==RulerBand::Vertical)horizontal=false;
+    else if(auto hit=guideIndexAt(view)){index=*hit;horizontal=guides[size_t(*hit)].first;}
+    else return false;
+    const auto document=documentPoint(view);
+    guideDrag_=GuideDrag{horizontal,horizontal?document.y():document.x(),index,view};
+    setCursor(horizontal?Qt::SizeVerCursor:Qt::SizeHorCursor);
+    if(guideDragUpdated)guideDragUpdated(guideDrag_->horizontal,guideDrag_->position);
+    update();
+    return true;
+}
+void NativeCanvas::updateGuideDrag(QPointF view){
+    if(!guideDrag_)return;
+    const auto document=documentPoint(view);
+    guideDrag_->view=view;
+    guideDrag_->position=guideDrag_->horizontal?document.y():document.x();
+    if(!std::isfinite(guideDrag_->position))guideDrag_->position=0;
+    if(guideDragUpdated)guideDragUpdated(guideDrag_->horizontal,guideDrag_->position);
+    update();
+}
+void NativeCanvas::cancelGuideDrag(){
+    if(!guideDrag_)return;
+    guideDrag_.reset();
+    if(QWidget::mouseGrabber()==this)releaseMouse();
+    unsetCursor();
+    if(guideDragCanceled)guideDragCanceled();
+    update();
+}
+void NativeCanvas::finishGuideDrag(QPointF view){
+    if(!guideDrag_)return;
+    updateGuideDrag(view);
+    const GuideDrag drag=*guideDrag_;
+    guideDrag_.reset();
+    if(QWidget::mouseGrabber()==this)releaseMouse();
+    unsetCursor();
+    const bool creating=drag.index<0;
+    const double extent=drag.horizontal?double(documentHeight_):double(documentWidth_);
+    const bool outsideDocument=!(drag.position>=0&&drag.position<=extent);
+    if((creating&&!contentRect().contains(view))||outsideDocument){if(guideDragCanceled)guideDragCanceled();update();return;}
+    if(!std::isfinite(drag.position)||std::abs(drag.position)>1000000){if(guideDragCanceled)guideDragCanceled();update();return;}
+    if(guideDragFinished)guideDragFinished(drag.horizontal,drag.position,drag.index);
+    update();
+}
+void NativeCanvas::drawGuideOverlay(){
+    if(!context_||documentWidth_<=0||documentHeight_<=0)return;
+    const bool preview=guideDrag_.has_value();
+    if(!showGuides&&!preview)return;
+    const auto mapping=viewMapping();
+    const double scale=mapping.pointsPerPixel;
+    if(!(scale>0))return;
+    const auto frame=contentRect();
+    const float docLeft=float(mapping.origin.x),docTop=float(mapping.origin.y);
+    const auto document=D2D1::RectF(docLeft,docTop,docLeft+float(documentWidth_*scale),docTop+float(documentHeight_*scale));
+    const auto content=D2D1::RectF(float(frame.left()),float(frame.top()),float(frame.right()),float(frame.bottom()));
+    auto clipFor=[&](bool limitToDocument){
+        auto clip=content;
+        if(limitToDocument){clip.left=std::max(clip.left,document.left);clip.top=std::max(clip.top,document.top);clip.right=std::min(clip.right,document.right);clip.bottom=std::min(clip.bottom,document.bottom);}
+        return clip;
+    };
+    auto drawLine=[&](bool horizontal,double position,ID2D1Brush* brush,bool limitToDocument){
+        const auto clip=clipFor(limitToDocument);
+        if(clip.right<=clip.left||clip.bottom<=clip.top)return;
+        context_->PushAxisAlignedClip(clip,D2D1_ANTIALIAS_MODE_ALIASED);
+        if(horizontal){const float y=docTop+float(position*scale);context_->DrawLine(D2D1::Point2F(clip.left,y),D2D1::Point2F(clip.right,y),brush,1);}
+        else{const float x=docLeft+float(position*scale);context_->DrawLine(D2D1::Point2F(x,clip.top),D2D1::Point2F(x,clip.bottom),brush,1);}
+        context_->PopAxisAlignedClip();
+    };
+    if(showGuides){ComPtr<ID2D1SolidColorBrush> guide;check(context_->CreateSolidColorBrush(D2D1::ColorF(.2f,.75f,.95f,.85f),&guide),"Guide brush");for(auto [horizontal,position]:guides)drawLine(horizontal,position,guide.Get(),true);}
+    if(preview){ComPtr<ID2D1SolidColorBrush> live;check(context_->CreateSolidColorBrush(D2D1::ColorF(1.f,.86f,.25f),&live),"Guide preview");drawLine(guideDrag_->horizontal,guideDrag_->position,live.Get(),false);}
+}
+void NativeCanvas::drawLayoutGrid(){
+    if(!context_||!layoutGrid_.visible||!layoutGrid_.valid()||documentWidth_<=0||documentHeight_<=0||layoutGrid_.opacity<=0)return;
+    const auto mapping=viewMapping();
+    const double scale=mapping.pointsPerPixel;
+    if(!(scale>0))return;
+    // Lines closer than 6 DIP read as noise. Hide minor lines first, then all lines; snapping still uses the full step.
+    const double majorGap=layoutGrid_.spacing*scale,minorGap=layoutGrid_.step()*scale;
+    if(majorGap<6)return;
+    const bool minorVisible=minorGap>=6;
+    const auto frame=contentRect();
+    const auto documentRect=D2D1::RectF(float(mapping.origin.x),float(mapping.origin.y),float(mapping.origin.x+documentWidth_*scale),float(mapping.origin.y+documentHeight_*scale));
+    const auto content=D2D1::RectF(float(frame.left()),float(frame.top()),float(frame.right()),float(frame.bottom()));
+    const auto clip=D2D1::RectF(std::max(content.left,documentRect.left),std::max(content.top,documentRect.top),std::min(content.right,documentRect.right),std::min(content.bottom,documentRect.bottom));
+    if(clip.right<=clip.left||clip.bottom<=clip.top)return;
+    const auto [red,green,blue]=layoutGrid_.color;
+    const float alpha=float(layoutGrid_.opacity);
+    ComPtr<ID2D1SolidColorBrush> major,minor;
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(red/255.f,green/255.f,blue/255.f,alpha),&major),"Layout grid brush");
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(red/255.f,green/255.f,blue/255.f,alpha*.5f),&minor),"Layout grid minor brush");
+    const auto low=mapping.toDocument({double(clip.left),double(clip.top)}),high=mapping.toDocument({double(clip.right),double(clip.bottom)});
+    const double lineStep=minorVisible?layoutGrid_.step():layoutGrid_.spacing;
+    const long long subdivisions=layoutGrid_.subdivisions;
+    context_->PushAxisAlignedClip(clip,D2D1_ANTIALIAS_MODE_ALIASED);
+    const auto drawAxis=[&](bool horizontal,double from,double to){
+        const long long first=std::max(0LL,static_cast<long long>(std::ceil(from/lineStep))),last=static_cast<long long>(std::floor(to/lineStep));
+        // Bounded by the visible document span; at most one line per minor gap of view pixels.
+        for(long long index=first;index<=last&&index-first<5000;++index){
+            const bool majorLine=!minorVisible||index%subdivisions==0;
+            const double value=double(index)*lineStep;
+            const float at=float(horizontal?mapping.toView({0,value}).y:mapping.toView({value,0}).x);
+            auto* brush=majorLine?major.Get():minor.Get();
+            if(horizontal)context_->DrawLine(D2D1::Point2F(clip.left,at),D2D1::Point2F(clip.right,at),brush,1);
+            else context_->DrawLine(D2D1::Point2F(at,clip.top),D2D1::Point2F(at,clip.bottom),brush,1);
+        }
+    };
+    drawAxis(true,low.y,high.y);drawAxis(false,low.x,high.x);
+    context_->PopAxisAlignedClip();
+}
+void NativeCanvas::drawRulers(){
+    if(!context_||!showRulers||documentWidth_<=0||documentHeight_<=0)return;
+    const auto frame=contentRect();
+    if(frame.left()<=0||frame.top()<=0||frame.width()<=0||frame.height()<=0)return;
+    const float thickness=float(rulerThickness),widgetWidth=float(width()),widgetHeight=float(height());
+    ComPtr<ID2D1SolidColorBrush> fill,tick,edge,text;
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(.18f,.19f,.22f),&fill),"Ruler fill");
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(.78f,.8f,.84f),&tick),"Ruler tick");
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(.08f,.08f,.1f),&edge),"Ruler edge");
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(.9f,.91f,.93f),&text),"Ruler text");
+    context_->FillRectangle(D2D1::RectF(0,0,widgetWidth,thickness),fill.Get());
+    context_->FillRectangle(D2D1::RectF(0,thickness,thickness,widgetHeight),fill.Get());
+    context_->DrawLine(D2D1::Point2F(0,thickness),D2D1::Point2F(widgetWidth,thickness),edge.Get(),1);
+    context_->DrawLine(D2D1::Point2F(thickness,0),D2D1::Point2F(thickness,widgetHeight),edge.Get(),1);
+    const double scale=pointsPerPixel();
+    const double major=rulerMajorInterval();
+    if(!(scale>0)||!(major>0)||!std::isfinite(scale)||!std::isfinite(major))return;
+    int divisions=1;
+    if(major/10.*scale>=8)divisions=10;else if(major/5.*scale>=8)divisions=5;else if(major/2.*scale>=8)divisions=2;
+    const double minor=major/divisions;
+    if(!(minor>0)||!std::isfinite(minor))return;
+    const auto mapping=viewMapping();
+    const auto topLeft=documentPoint(frame.topLeft());
+    const auto bottomRight=documentPoint(QPointF(frame.right(),frame.bottom()));
+    auto drawAxis=[&](bool horizontal){
+        const double minValue=horizontal?topLeft.x():topLeft.y();
+        const double maxValue=horizontal?bottomRight.x():bottomRight.y();
+        if(!std::isfinite(minValue)||!std::isfinite(maxValue)||maxValue<minValue)return;
+        context_->PushAxisAlignedClip(horizontal?D2D1::RectF(thickness,0,widgetWidth,thickness):D2D1::RectF(0,thickness,thickness,widgetHeight),D2D1_ANTIALIAS_MODE_ALIASED);
+        const double start=std::floor(minValue/minor)*minor;
+        for(int count=0;count<500;++count){
+            const double value=start+count*minor;
+            if(value>maxValue+minor*0.01)break;
+            const auto view=mapping.toView(horizontal?Point{value,0}:Point{0,value});
+            const float at=float(horizontal?view.x:view.y);
+            const bool majorTick=std::abs(value/major-std::round(value/major))<1e-3;
+            const float length=majorTick?10.f:5.f;
+            if(horizontal)context_->DrawLine(D2D1::Point2F(at,thickness-length),D2D1::Point2F(at,thickness),tick.Get(),1);
+            else context_->DrawLine(D2D1::Point2F(thickness-length,at),D2D1::Point2F(thickness,at),tick.Get(),1);
+            if(!majorTick)continue;
+            const auto label=rulerLabel(value).toStdWString();
+            if(horizontal)context_->DrawText(label.c_str(),UINT32(label.size()),rulerTextFormat(),D2D1::RectF(at-28,0,at+28,thickness-8),text.Get());
+            else context_->DrawText(label.c_str(),UINT32(label.size()),rulerTextFormat(),D2D1::RectF(0,at-8,thickness-6,at+8),text.Get());
+        }
+        context_->PopAxisAlignedClip();
+    };
+    drawAxis(true);drawAxis(false);
+    if(guideDrag_){
+        const auto label=rulerLabel(guideDrag_->position).toStdWString();
+        const float labelWidth=std::max(36.f,float(label.size())*7.f);
+        const float x=std::clamp(float(guideDrag_->view.x())+8.f,float(frame.left()+2),float(std::max(frame.left()+2,frame.right()-labelWidth-2)));
+        const float y=std::clamp(float(guideDrag_->view.y())+8.f,float(frame.top()+2),float(std::max(frame.top()+2,frame.bottom()-16)));
+        const auto box=D2D1::RectF(x,y,x+labelWidth,y+14);
+        ComPtr<ID2D1SolidColorBrush> back,ink;
+        check(context_->CreateSolidColorBrush(D2D1::ColorF(.1f,.1f,.12f,.92f),&back),"Guide label");
+        check(context_->CreateSolidColorBrush(D2D1::ColorF(1.f,.9f,.4f),&ink),"Guide label text");
+        context_->FillRectangle(box,back.Get());
+        context_->DrawText(label.c_str(),UINT32(label.size()),rulerTextFormat(),box,ink.Get());
+    }
+}
+void NativeCanvas::draw(bool present){proofApplied_=false;const double scale=pointsPerPixel();const bool held=viewportDeferred_||movePreview_||compositeHeld_;
+const bool deferred=!held&&deferViewportComposite&&deferViewportComposite();
+const bool skipComposite=held||deferred||viewportPresented_;viewportPresented_=false;if(!skipComposite&&viewportProvider){const auto request=viewportBounds();if(request.valid){const bool same=request.x==lastCompositeX_&&request.y==lastCompositeY_&&request.width==lastCompositeW_&&request.height==lastCompositeH_&&request.units==lastCompositeUnits_;if(compositeDirty_||!raster_||!same){auto patch=viewportProvider(request.x,request.y,request.width,request.height,request.units);raster_=std::move(patch.raster);rasterX_=patch.documentX;rasterY_=patch.documentY;rasterUnits_=patch.unitsPerPixel;lastCompositeX_=request.x;lastCompositeY_=request.y;lastCompositeW_=request.width;lastCompositeH_=request.height;lastCompositeUnits_=request.units;compositeDirty_=false;upload();}}}if(!context_)createDevice();preparePresentation();context_->BeginDraw();context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);context_->Clear(blackSurround_?D2D1::ColorF(0,0,0):D2D1::ColorF(.115f,.122f,.137f));if(raster_||movePreview_){const auto placed=viewMapping();float left=float(placed.origin.x),top=float(placed.origin.y);auto bounds=D2D1::RectF(left,top,left+float(documentWidth_*scale),top+float(documentHeight_*scale));auto renderBounds=bounds;if(cropOverlay_){const auto& crop=*cropOverlay_;renderBounds=D2D1::RectF(left+float(std::min(0.,crop.x)*scale),top+float(std::min(0.,crop.y)*scale),left+float(std::max(double(documentWidth_),crop.x+crop.width)*scale),top+float(std::max(double(documentHeight_),crop.y+crop.height)*scale));}const bool proofing=beginCmykProof();context_->PushAxisAlignedClip(renderBounds,D2D1_ANTIALIAS_MODE_ALIASED);if(!proofing){ensureChecker();context_->FillRectangle(D2D1::RectF(0,0,float(width()),float(height())),checkerBrush_.Get());}if(!movePreview_)drawDocumentStandIn(bounds);if(image_&&!movePreview_)context_->DrawBitmap(image_.Get(),bounds,1,D2D1_INTERPOLATION_MODE_LINEAR);else{const Raster* shown=movePreview_&&movePreview_->base?movePreview_->base.get():raster_.get();if(shown)drawRasterTiles(*shown,movePreview_?movePreview_->baseX:rasterX_,movePreview_?movePreview_->baseY:rasterY_,movePreview_?movePreview_->baseUnits:rasterUnits_,left,top,scale);}if(movePreview_){drawMoveSprite(scale);if(movePreview_->plate){const double dx=movePreview_->placed.x-movePreview_->anchorX,dy=movePreview_->placed.y-movePreview_->anchorY;drawRasterTiles(*movePreview_->plate,movePreview_->plateX+dx,movePreview_->plateY+dy,movePreview_->baseUnits,left,top,scale);}if(movePreview_->front)drawRasterTiles(*movePreview_->front,movePreview_->baseX,movePreview_->baseY,movePreview_->baseUnits,left,top,scale);}
+if(proofing){if(textOverlay_)drawTextOverlay(true);context_->PopAxisAlignedClip();finishCmykProof(bounds);context_->PushAxisAlignedClip(renderBounds,D2D1_ANTIALIAS_MODE_ALIASED);}
+if(showPixelGrid&&zoom>=8){
+    const auto area=D2D1::RectF(std::max(0.f,left),std::max(0.f,top),std::min(float(width()),bounds.right),std::min(float(height()),bounds.bottom));
+    if(area.right>area.left&&area.bottom>area.top){
+        // EditorCanvas.swift 896-919 fills one winding path so crossings have
+        // the same coverage as each one-physical-pixel hairline.
+        const float halfHairline=float(.5/backingScale_);
+        ComPtr<ID2D1PathGeometry> path;check(factory_->CreatePathGeometry(&path),"Grid path");
+        ComPtr<ID2D1GeometrySink> sink;check(path->Open(&sink),"Grid path sink");sink->SetFillMode(D2D1_FILL_MODE_WINDING);
+        auto rectangle=[&](D2D1_RECT_F rect){sink->BeginFigure(D2D1::Point2F(rect.left,rect.top),D2D1_FIGURE_BEGIN_FILLED);sink->AddLine(D2D1::Point2F(rect.right,rect.top));sink->AddLine(D2D1::Point2F(rect.right,rect.bottom));sink->AddLine(D2D1::Point2F(rect.left,rect.bottom));sink->EndFigure(D2D1_FIGURE_END_CLOSED);};
+        const int firstX=std::max(0,int(std::ceil((area.left-left)/scale))),lastX=std::min(documentWidth_,int(std::floor((area.right-left)/scale)));
+        const int firstY=std::max(0,int(std::ceil((area.top-top)/scale))),lastY=std::min(documentHeight_,int(std::floor((area.bottom-top)/scale)));
+        for(int x=firstX;x<=lastX;++x){const float px=left+float(x*scale);rectangle(D2D1::RectF(px-halfHairline,area.top,px+halfHairline,area.bottom));}
+        for(int y=firstY;y<=lastY;++y){const float py=top+float(y*scale);rectangle(D2D1::RectF(area.left,py-halfHairline,area.right,py+halfHairline));}
+        check(sink->Close(),"Grid path close");ComPtr<ID2D1SolidColorBrush> grid;
+        check(context_->CreateSolidColorBrush(D2D1::ColorF(.55f,.55f,.55f,.45f),&grid),"Grid brush");
+        context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);context_->FillGeometry(path.Get(),grid.Get());context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+    }
+}
+context_->PopAxisAlignedClip();}
+drawLayoutGrid();
+drawGuideOverlay();
+drawSelection();
+if(selectionDraft_&&!selectionDraft_->points.empty()&&documentWidth_>0&&documentHeight_>0){
+    auto points=selectionDraft_->points;
+    if(selectionDraft_->kind==editing::LassoKind::Polygonal&&selectionDraft_->cursor)points.push_back(*selectionDraft_->cursor);
+    const auto mapping=viewMapping();for(auto& point:points)point=mapping.toView(point);
+    ComPtr<ID2D1PathGeometry> path;check(factory_->CreatePathGeometry(&path),"Selection draft path");
+    ComPtr<ID2D1GeometrySink> sink;check(path->Open(&sink),"Selection draft sink");
+    auto point=[](Point p){return D2D1::Point2F(float(p.x),float(p.y));};
+    sink->BeginFigure(point(points.front()),D2D1_FIGURE_BEGIN_HOLLOW);
+    for(size_t i=1;i<points.size();++i)sink->AddLine(point(points[i]));
+    sink->EndFigure(selectionDraft_->kind==editing::LassoKind::Rectangle?D2D1_FIGURE_END_CLOSED:D2D1_FIGURE_END_OPEN);check(sink->Close(),"Selection draft path close");
+    ComPtr<ID2D1SolidColorBrush> black,white;
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(0,0,0,.8f),&black),"Selection draft black");
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(1,1,1),&white),"Selection draft white");
+    context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    if(selectionDraft_->kind==editing::LassoKind::Ellipse&&points.size()==4){
+        const auto a=points.front(),b=points[2];const auto ellipse=D2D1::Ellipse(D2D1::Point2F(float((a.x+b.x)/2),float((a.y+b.y)/2)),float(std::abs(b.x-a.x)/2),float(std::abs(b.y-a.y)/2));
+        context_->DrawEllipse(ellipse,black.Get(),2);context_->DrawEllipse(ellipse,white.Get(),1);
+    }else{context_->DrawGeometry(path.Get(),black.Get(),2);context_->DrawGeometry(path.Get(),white.Get(),1);}
+    if(selectionDraft_->kind==editing::LassoKind::Polygonal){const auto first=points.front();const auto handle=D2D1::RectF(float(first.x-4),float(first.y-4),float(first.x+4),float(first.y+4));context_->FillRectangle(handle,white.Get());context_->DrawRectangle(handle,black.Get(),1);}
+    context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+}
+if(shapeDraft_&&documentWidth_>0&&documentHeight_>0){
+    // TransformOverlay.drawShapeDraft: a transient document-space fill with a
+    // one-DIP black outline. No layer pixels or history exist before release.
+    const auto& draft=*shapeDraft_;const auto mapping=viewMapping();
+    const auto a=mapping.toView({draft.rect.x,draft.rect.y}),b=mapping.toView({draft.rect.x+draft.rect.width,draft.rect.y+draft.rect.height});
+    const auto bounds=D2D1::RectF(float(a.x),float(a.y),float(b.x),float(b.y));
+    ComPtr<ID2D1SolidColorBrush> fill,outline;
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(draft.fill.r/255.f,draft.fill.g/255.f,draft.fill.b/255.f,draft.fill.a/255.f),&fill),"Shape draft fill");
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(0,0,0,.6f),&outline),"Shape draft outline");
+    context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    if(draft.style.kind==editing::ShapeKind::Line){
+        auto point=[&](double x,double y){return D2D1::Point2F(float(bounds.left+x*(bounds.right-bounds.left)),float(bounds.top+y*(bounds.bottom-bounds.top)));};
+        const auto cap=draft.style.lineCap==editing::ShapeLineCap::Round?D2D1_CAP_STYLE_ROUND:D2D1_CAP_STYLE_SQUARE;
+        const auto pattern=editing::shapeLinePattern(draft.style.lineStyle);std::vector<float> dashes;for(size_t i=0;i<pattern.size();++i)dashes.push_back(float(i%2?pattern[i]+1:std::max(.001,pattern[i]-1)));
+        D2D1_STROKE_STYLE_PROPERTIES properties=D2D1::StrokeStyleProperties(cap,cap,cap,D2D1_LINE_JOIN_MITER,10,pattern.empty()?D2D1_DASH_STYLE_SOLID:D2D1_DASH_STYLE_CUSTOM,0);
+        ComPtr<ID2D1StrokeStyle> stroke;check(factory_->CreateStrokeStyle(properties,dashes.empty()?nullptr:dashes.data(),UINT32(dashes.size()),&stroke),"Line draft stroke");
+        context_->DrawLine(point(draft.style.startX,draft.style.startY),point(draft.style.endX,draft.style.endY),fill.Get(),float(std::max(1.,draft.style.lineWidth)*pointsPerPixel()),stroke.Get());
+    }
+    else if(draft.style.kind==editing::ShapeKind::Ellipse){const auto ellipse=D2D1::Ellipse(D2D1::Point2F((bounds.left+bounds.right)/2,(bounds.top+bounds.bottom)/2),(bounds.right-bounds.left)/2,(bounds.bottom-bounds.top)/2);context_->FillEllipse(ellipse,fill.Get());context_->DrawEllipse(ellipse,outline.Get(),1);}
+    else{
+        const auto geometry=editing::rectangleShapeOutline({0,0,draft.rect.width,draft.rect.height},draft.style);
+        ComPtr<ID2D1PathGeometry> path;
+        check(factory_->CreatePathGeometry(&path),"Shape draft path");
+        ComPtr<ID2D1GeometrySink> sink;
+        check(path->Open(&sink),"Shape draft path sink");
+        const float scale=float(mapping.pointsPerPixel);
+        geometry.writeGeometry(sink.Get(),{scale,0,0,scale,bounds.left,bounds.top});
+        check(sink->Close(),"Shape draft path close");
+        context_->FillGeometry(path.Get(),fill.Get());
+        context_->DrawGeometry(path.Get(),outline.Get(),1);
+    }
+    context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+}
+if(cropOverlay_&&documentWidth_>0&&documentHeight_>0){
+    const auto& crop=*cropOverlay_;const auto mapping=viewMapping();
+    const auto a=mapping.toView({crop.x,crop.y}),b=mapping.toView({crop.x+crop.width,crop.y+crop.height});
+    const auto box=D2D1::RectF(float(a.x),float(a.y),float(b.x),float(b.y));
+    ComPtr<ID2D1SolidColorBrush> dim,white,thirds,black;
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(0,0,0,.6f),&dim),"Crop shade");
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(1,1,1),&white),"Crop outline");
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(1,1,1,.4f),&thirds),"Crop thirds");
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(0,0,0),&black),"Crop handles");
+    ComPtr<ID2D1PathGeometry> shade;ComPtr<ID2D1GeometrySink> sink;
+    check(factory_->CreatePathGeometry(&shade),"Crop shade geometry");check(shade->Open(&sink),"Crop shade sink");sink->SetFillMode(D2D1_FILL_MODE_ALTERNATE);
+    for(const auto bounds:{D2D1::RectF(0,0,float(width()),float(height())),box}){
+        sink->BeginFigure(D2D1::Point2F(bounds.left,bounds.top),D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddLine(D2D1::Point2F(bounds.right,bounds.top));sink->AddLine(D2D1::Point2F(bounds.right,bounds.bottom));sink->AddLine(D2D1::Point2F(bounds.left,bounds.bottom));sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    }check(sink->Close(),"Crop shade close");context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    context_->FillGeometry(shade.Get(),dim.Get());context_->DrawRectangle(box,white.Get(),1);
+    for(int index=1;index<=2;++index){const float fraction=float(index)/3;const float x=box.left+(box.right-box.left)*fraction,y=box.top+(box.bottom-box.top)*fraction;
+        context_->DrawLine(D2D1::Point2F(x,box.top),D2D1::Point2F(x,box.bottom),thirds.Get(),1);
+        context_->DrawLine(D2D1::Point2F(box.left,y),D2D1::Point2F(box.right,y),thirds.Get(),1);}
+    const auto geometry=editing_transform::OverlayGeometry::fromTransform({crop.x,crop.y,crop.width,crop.height},mapping);
+    for(const auto handle:geometry.handles){const auto bounds=D2D1::RectF(float(handle.x-4),float(handle.y-4),float(handle.x+4),float(handle.y+4));context_->FillRectangle(bounds,white.Get());context_->DrawRectangle(bounds,black.Get(),1);}
+    context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+}
+if(gradientLine_&&documentWidth_>0&&documentHeight_>0){
+    const auto a=viewMapping().toView(gradientLine_->first),b=viewMapping().toView(gradientLine_->second);
+    const auto start=D2D1::Point2F(float(a.x),float(a.y)),end=D2D1::Point2F(float(b.x),float(b.y));
+    ComPtr<ID2D1SolidColorBrush> black,white;
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(0,0,0,.7f),&black),"Gradient outline");
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(1,1,1),&white),"Gradient line");
+    context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    context_->DrawLine(start,end,black.Get(),3);context_->DrawLine(start,end,white.Get(),1);
+    black->SetColor(D2D1::ColorF(0,0,0));
+    for(auto point:{start,end}){const auto handle=D2D1::Ellipse(point,6,6);context_->FillEllipse(handle,white.Get());context_->DrawEllipse(handle,black.Get(),1);}
+    context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+}
+if(!cameraRawGuides_.empty()&&documentWidth_>0&&documentHeight_>0){
+    ComPtr<ID2D1SolidColorBrush> black,white;
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(0,0,0,.7f),&black),"Camera Raw guide outline");
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(1,1,1),&white),"Camera Raw guide");
+    context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    const auto mapping=viewMapping();
+    for(const auto& segment:cameraRawGuides_){
+        const auto a=mapping.toView(segment.first),b=mapping.toView(segment.second);
+        const auto start=D2D1::Point2F(float(a.x),float(a.y)),end=D2D1::Point2F(float(b.x),float(b.y));
+        context_->DrawLine(start,end,black.Get(),3);context_->DrawLine(start,end,white.Get(),1);
+        black->SetColor(D2D1::ColorF(0,0,0));
+        for(auto point:{start,end}){const auto handle=D2D1::Ellipse(point,6,6);context_->FillEllipse(handle,white.Get());context_->DrawEllipse(handle,black.Get(),1);}
+        black->SetColor(D2D1::ColorF(0,0,0,.7f));
+    }
+    context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+}
+if((transformOverlay_||distortionOverlay_)&&documentWidth_>0&&documentHeight_>0){auto overlay=distortionOverlay_?editing_transform::OverlayGeometry::fromCorners(*distortionOverlay_,viewMapping()):editing_transform::OverlayGeometry::fromTransform(*transformOverlay_,viewMapping());ComPtr<ID2D1SolidColorBrush> line,fill;check(context_->CreateSolidColorBrush(D2D1::ColorF(.3f,.7f,1),&line),"Transform outline");check(context_->CreateSolidColorBrush(D2D1::ColorF(1,1,1),&fill),"Transform handle");auto point=[](Point p){return D2D1::Point2F(float(p.x),float(p.y));};for(int i=0;i<4;++i)context_->DrawLine(point(overlay.outline[i]),point(overlay.outline[(i+1)%4]),line.Get(),1);for(auto h:overlay.handles){auto box=D2D1::RectF(float(h.x-3),float(h.y-3),float(h.x+3),float(h.y+3));context_->FillRectangle(box,fill.Get());context_->DrawRectangle(box,line.Get(),1);}if(overlay.showsRotation){context_->DrawLine(point(overlay.handles[1]),point(overlay.rotationHandle),line.Get(),1);context_->FillEllipse(D2D1::Ellipse(point(overlay.rotationHandle),4,4),fill.Get());context_->DrawEllipse(D2D1::Ellipse(point(overlay.rotationHandle),4,4),line.Get(),1);}}
+if(brushCursor_){
+    const auto& cursor=*brushCursor_;const auto center=D2D1::Point2F(float(cursor.center.x),float(cursor.center.y));const float radius=float(cursor.diameter/2);
+    ComPtr<ID2D1SolidColorBrush> black,white;check(context_->CreateSolidColorBrush(D2D1::ColorF(0,0,0),&black),"Brush cursor black");check(context_->CreateSolidColorBrush(D2D1::ColorF(1,1,1),&white),"Brush cursor white");
+    context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    const auto circle=D2D1::Ellipse(center,radius,radius);
+    if(cursor.preview&&cursor.opacity>0){
+        const auto& image=*cursor.preview;
+        if(image.width<1||image.height<1||image.width>1024||image.height>1024)throw std::invalid_argument("Invalid clone cursor bitmap extent");
+        if(brushPreviewSource_!=cursor.preview||!brushPreviewBitmap_){
+            std::vector<Pixel> pixels(size_t(image.width)*image.height);
+            for(int y=0;y<image.height;++y)for(int x=0;x<image.width;++x)pixels[size_t(y)*image.width+x]=image.pixel(x,y);
+            auto properties=D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE,D2D1::PixelFormat(DXGI_FORMAT_R8G8B8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED));
+            brushPreviewBitmap_.Reset();check(context_->CreateBitmap(D2D1::SizeU(UINT32(image.width),UINT32(image.height)),pixels.data(),UINT32(image.width*4),&properties,&brushPreviewBitmap_),"Clone cursor bitmap");brushPreviewSource_=cursor.preview;
+        }
+        ComPtr<ID2D1EllipseGeometry> mask;check(factory_->CreateEllipseGeometry(circle,&mask),"Clone cursor clip");
+        context_->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(),mask.Get()),nullptr);
+        context_->DrawBitmap(brushPreviewBitmap_.Get(),D2D1::RectF(center.x-radius,center.y-radius,center.x+radius,center.y+radius),float(std::clamp(cursor.opacity,0.,1.)),D2D1_INTERPOLATION_MODE_LINEAR);
+        context_->PopLayer();
+    }
+    context_->DrawEllipse(circle,white.Get(),2.5f);context_->DrawEllipse(circle,black.Get(),1);
+    if(cursor.hardness&&*cursor.hardness>0){
+        auto style=D2D1::StrokeStyleProperties();style.dashStyle=D2D1_DASH_STYLE_CUSTOM;
+        const float whiteDashes[]{4/2.5f,3/2.5f},blackDashes[]{4,3};ComPtr<ID2D1StrokeStyle> whiteDash,blackDash;
+        check(factory_->CreateStrokeStyle(style,whiteDashes,2,&whiteDash),"Hardness white dash");check(factory_->CreateStrokeStyle(style,blackDashes,2,&blackDash),"Hardness black dash");
+        const float inner=radius*float(*cursor.hardness);const auto ring=D2D1::Ellipse(center,inner,inner);context_->DrawEllipse(ring,white.Get(),2.5f,whiteDash.Get());context_->DrawEllipse(ring,black.Get(),1,blackDash.Get());
+    }
+    if(cursor.marker){const float x=float(cursor.marker->x),y=float(cursor.marker->y);for(const bool horizontal:{true,false}){const auto a=D2D1::Point2F(x-(horizontal?7:0),y-(horizontal?0:7)),b=D2D1::Point2F(x+(horizontal?7:0),y+(horizontal?0:7));context_->DrawLine(a,b,white.Get(),3);context_->DrawLine(a,b,black.Get(),1);}}
+}
+if(sampleRing_){auto center=viewMapping().toView(sampleRing_->position);auto ring=D2D1::Ellipse(D2D1::Point2F(float(center.x),float(center.y)),43,43);ComPtr<ID2D1SolidColorBrush> brush;check(context_->CreateSolidColorBrush(D2D1::ColorF(.45f,.45f,.45f),&brush),"Sample ring");context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);context_->DrawEllipse(ring,brush.Get(),24);for(int half=0;half<2;++half){auto color=half?sampleRing_->original:sampleRing_->sampled;brush->SetColor(D2D1::ColorF(color.r/255.f,color.g/255.f,color.b/255.f));context_->PushAxisAlignedClip(D2D1::RectF(float(center.x-58),float(center.y+(half?0:-58)),float(center.x+58),float(center.y+(half?58:0))),D2D1_ANTIALIAS_MODE_ALIASED);context_->DrawEllipse(ring,brush.Get(),16);context_->PopAxisAlignedClip();}}
+if((snapGuideX_||snapGuideY_)&&documentWidth_>0&&documentHeight_>0){
+    const auto color=palette().color(QPalette::Highlight);ComPtr<ID2D1SolidColorBrush> accent;
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(float(color.redF()),float(color.greenF()),float(color.blueF())),&accent),"Snap guide");
+    const auto mapping=viewMapping();const auto point=[&](Point p){auto view=mapping.toView(p);return D2D1::Point2F(float(view.x),float(view.y));};
+    context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    if(snapGuideX_)context_->DrawLine(point({*snapGuideX_,0}),point({*snapGuideX_,double(documentHeight_)}),accent.Get(),1);
+    if(snapGuideY_)context_->DrawLine(point({0,*snapGuideY_}),point({double(documentWidth_),*snapGuideY_}),accent.Get(),1);
+}
+if(textOverlay_)drawTextOverlay(false,proofApplied_);
+drawRulers();
+drawNavigator();
+auto hr=context_->EndDraw();if(hr==D2DERR_RECREATE_TARGET){releaseDevice();update();return;}if(FAILED(hr)&&proofApplied_){proofFailure_=QString("CMYK proof failed (HRESULT 0x%1)").arg(uint32_t(hr),8,16,QChar('0'));setToolTip(proofFailure_);resetCmykResources();draw(present);return;}check(hr,"Canvas draw");hr=finishPresentation();if(hr==D2DERR_RECREATE_TARGET){releaseDevice();update();return;}check(hr,"Canvas presentation");if(!present)return;hr=swap_->Present(1,0);if(hr==DXGI_ERROR_DEVICE_REMOVED||hr==DXGI_ERROR_DEVICE_RESET){releaseDevice();update();return;}check(hr,"Canvas present");}
+std::optional<int> NativeCanvas::cropResizeHandle(editing::Rect crop,Point point,const editing_transform::ViewMapping& mapping){
+    const auto geometry=editing_transform::OverlayGeometry::fromTransform({crop.x,crop.y,crop.width,crop.height},mapping);
+    const auto contains=[&](double x,double y,double w,double h){return point.x>=x&&point.y>=y&&point.x<x+w&&point.y<y+h;};
+    for(const int index:{0,2,4,6}){const auto p=geometry.handles[size_t(index)];if(contains(p.x-10,p.y-10,20,20))return index;}
+    const auto a=geometry.handles[0],b=geometry.handles[4];
+    for(const int index:{1,5})if(contains(a.x+10,geometry.handles[size_t(index)].y-10,std::max(0.,b.x-a.x-20),20))return index;
+    for(const int index:{3,7})if(contains(geometry.handles[size_t(index)].x-10,a.y+10,20,std::max(0.,b.y-a.y-20)))return index;
+    return {};
+}
+void NativeCanvas::setSelection(std::shared_ptr<const GrayRaster> value,std::shared_ptr<const editing::SelectionOutline> outline){
+    if(selection_==value&&selectionInputOutline_==outline)return;
+    auto path=outline;
+    if(!path&&value&&value->source)path=value->source->vectorOutline();
+    if(!path&&value)path=std::make_shared<editing::SelectionOutline>(editing::SelectionOutline::fromCoverage(*value));
+    selection_=std::move(value);selectionInputOutline_=std::move(outline);selectionOutline_=std::move(path);
+    selectionGeometry_.Reset();selectionMatrix_.reset();updateSelectionAnimation();update();
+}
+void NativeCanvas::updateSelectionAnimation(){
+    if(selectionTimer_){const bool active=selectionOutline_&&!selectionOutline_->empty()&&documentWidth_>0&&documentHeight_>0&&isVisible();
+        if(active&&!selectionTimer_->isActive())selectionTimer_->start();else if(!active)selectionTimer_->stop();}
+}
+void NativeCanvas::drawSelection(){
+    if(!selectionOutline_||selectionOutline_->empty()||documentWidth_<=0||documentHeight_<=0)return;
+    const auto mapping=viewMapping();const std::array<float,6> matrix{float(mapping.pointsPerPixel),0,0,float(mapping.pointsPerPixel),float(mapping.origin.x),float(mapping.origin.y)};
+    if(!selectionGeometry_||selectionMatrix_!=matrix){
+        ComPtr<ID2D1PathGeometry> path;check(factory_->CreatePathGeometry(&path),"Selection path");
+        ComPtr<ID2D1GeometrySink> sink;check(path->Open(&sink),"Selection path sink");
+        selectionOutline_->writeGeometry(sink.Get(),matrix);check(sink->Close(),"Selection path close");
+        selectionGeometry_=std::move(path);selectionMatrix_=matrix;
+    }
+    ComPtr<ID2D1SolidColorBrush> black,white;
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(0,0,0,1),&black),"Selection black");
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(1,1,1,1),&white),"Selection white");
+    auto style=D2D1::StrokeStyleProperties();style.dashStyle=D2D1_DASH_STYLE_CUSTOM;style.dashOffset=float(selectionPhase_);
+    const float lengths[]{4,4};ComPtr<ID2D1StrokeStyle> dashed;check(factory_->CreateStrokeStyle(style,lengths,2,&dashed),"Selection dash");
+    context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    context_->DrawGeometry(selectionGeometry_.Get(),white.Get(),1);
+    context_->DrawGeometry(selectionGeometry_.Get(),black.Get(),1,dashed.Get());
+    context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+}
+void NativeCanvas::setRaster(std::shared_ptr<const Raster> r){raster_=std::move(r);setDocumentSize(raster_?raster_->width:0,raster_?raster_->height:0);rasterX_=rasterY_=0;rasterUnits_=1;try{upload();}catch(const std::exception&e){error_=e.what();releaseDevice();}update();}
+graphics::CanvasViewport NativeCanvas::viewportState()const{const auto frame=contentRect();return {{frame.width(),frame.height()},{pan.x(),pan.y()},backingScale_,zoom,followsFit_};}
+void NativeCanvas::installViewport(const graphics::CanvasViewport& state){const bool wasVisible=navigatorPlacement().visible;zoom=state.zoom;pan={state.pan.x,state.pan.y};backingScale_=state.backingScale;followsFit_=state.followsFit;update();if(!wasVisible&&navigatorPlacement().visible&&navigatorDirty_&&!navigatorDeferred_)scheduleNavigator();}
+void NativeCanvas::synchronizeViewport(){auto state=viewportState();const auto frame=contentRect();std::optional<Point> document;if(documentWidth_>0&&documentHeight_>0)document=Point{double(documentWidth_),double(documentHeight_)};state.resize({frame.width(),frame.height()},devicePixelRatioF(),document);installViewport(state);}
+void NativeCanvas::setDocumentSize(int w,int h){const bool changed=documentWidth_!=w||documentHeight_!=h;documentWidth_=w;documentHeight_=h;if(w<=0||h<=0){documentWidth_=documentHeight_=0;raster_.reset();selection_.reset();selectionInputOutline_.reset();selectionOutline_.reset();selectionGeometry_.Reset();selectionMatrix_.reset();selectionDraft_.reset();transformOverlay_.reset();distortionOverlay_.reset();gradientLine_.reset();cameraRawGuides_.clear();shapeDraft_.reset();cropOverlay_.reset();snapGuideX_.reset();snapGuideY_.reset();sampleRing_.reset();displayTiles_.clear();image_.Reset();navigatorRaster_.reset();navigatorBitmap_.Reset();navigatorDirty_=false;movePreview_.reset();if(navigatorTimer_)navigatorTimer_->stop();}updateSelectionAnimation();if(changed){synchronizeViewport();if(documentWidth_>0)scheduleNavigator();}else update();}
+void NativeCanvas::fit(){if(documentWidth_>0&&documentHeight_>0){auto state=viewportState();state.fit({double(documentWidth_),double(documentHeight_)});installViewport(state);}}
+editing_transform::ViewMapping NativeCanvas::viewMapping()const{if(documentWidth_<=0)return {};const auto frame=contentRect();const auto state=viewportState();auto origin=state.origin({double(documentWidth_),double(documentHeight_)});origin.x+=frame.left();origin.y+=frame.top();return {state.pointsPerPixel(),origin};}
+QPointF NativeCanvas::documentPoint(QPointF p)const{if(documentWidth_<=0)return p;const auto frame=contentRect();const auto point=viewportState().documentPoint({p.x()-frame.left(),p.y()-frame.top()},{double(documentWidth_),double(documentHeight_)});return {point.x,point.y};}
+void NativeCanvas::zoomAt(double value,QPointF anchor){if(documentWidth_<=0||documentHeight_<=0)return;noteViewportInteraction();const auto frame=contentRect();auto state=viewportState();state.setZoom(value,{anchor.x()-frame.left(),anchor.y()-frame.top()},{double(documentWidth_),double(documentHeight_)});installViewport(state);}
+void NativeCanvas::panBy(QPointF delta){noteViewportInteraction();auto state=viewportState();state.translate({delta.x(),delta.y()});installViewport(state);}
+QString NativeCanvas::adapterName()const{
+    if(!device_)return {};
+    ComPtr<IDXGIDevice> device;ComPtr<IDXGIAdapter> adapter;DXGI_ADAPTER_DESC description{};
+    if(FAILED(device_.As(&device))||FAILED(device->GetAdapter(&adapter))||FAILED(adapter->GetDesc(&description)))return {};
+    return QString::fromWCharArray(description.Description);
+}
+void NativeCanvas::setBlackSurround(bool black){
+    if(blackSurround_==black)return;
+    blackSurround_=black;update();
+}
+void NativeCanvas::recreateDevice(){releaseDevice();error_.clear();update();}
+QImage NativeCanvas::captureRendered(){
+    // Read the freshly rendered back buffer before Present advances the flip chain.
+    draw(false);
+    if(!device_||!swap_)throw std::runtime_error("No canvas graphics device");
+    ComPtr<ID3D11Texture2D> source;
+    check(swap_->GetBuffer(0,IID_PPV_ARGS(&source)),"Canvas capture buffer");
+    D3D11_TEXTURE2D_DESC desc{};source->GetDesc(&desc);
+    desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;desc.MiscFlags=0;
+    ComPtr<ID3D11Texture2D> staging;check(device_->CreateTexture2D(&desc,nullptr,&staging),"Canvas staging capture");
+    immediate_->CopyResource(staging.Get(),source.Get());
+    D3D11_MAPPED_SUBRESOURCE mapped{};check(immediate_->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped),"Canvas capture readback");
+    QImage image(static_cast<const uchar*>(mapped.pData),int(desc.Width),int(desc.Height),mapped.RowPitch,QImage::Format_ARGB32);
+    auto copy=image.copy();immediate_->Unmap(staging.Get(),0);check(swap_->Present(1,0),"Present captured canvas");return copy;
+}
+NativeCanvas::NavigatorPlacement NativeCanvas::navigatorPlacement()const{
+    NavigatorPlacement result;
+    if(documentWidth_<=0||documentHeight_<=0||width()<120||height()<120)return result;
+    const double docW=documentWidth_,docH=documentHeight_,margin=16,maxLong=160;
+    double mapW=docW>=docH?maxLong:std::max(36.,maxLong*docW/docH),mapH=docW>=docH?std::max(36.,maxLong*docH/docW):maxLong;
+    const double availW=width()-margin*2,availH=height()-margin*2;
+    if(availW<48||availH<48)return result;
+    if(mapW>availW||mapH>availH){const double fit=std::min(availW/mapW,availH/mapH);mapW*=fit;mapH*=fit;}
+    result.map=QRectF(width()-margin-mapW,height()-margin-mapH,mapW,mapH);
+    const auto frame=contentRect();const double scale=pointsPerPixel();if(scale<=0||mapW<=0||mapH<=0)return result;
+    const QPointF origin=documentPoint(frame.topLeft());
+    const double left=origin.x(),top=origin.y(),right=left+frame.width()/scale,bottom=top+frame.height()/scale,eps=.51;
+    result.visible=left>eps||top>eps||right<docW-eps||bottom<docH-eps;
+    const double visL=std::clamp(left,0.,docW),visT=std::clamp(top,0.,docH),visR=std::clamp(right,0.,docW),visB=std::clamp(bottom,0.,docH);
+    if(visR>visL&&visB>visT)result.viewport=QRectF(result.map.left()+visL/docW*mapW,result.map.top()+visT/docH*mapH,(visR-visL)/docW*mapW,(visB-visT)/docH*mapH);
+    return result;
+}
+void NativeCanvas::scheduleNavigator(){
+    if(!navigatorTimer_)return;
+    if(!navigatorProvider||documentWidth_<=0||documentHeight_<=0){navigatorDirty_=false;navigatorTimer_->stop();if(navigatorRaster_){navigatorRaster_.reset();navigatorBitmap_.Reset();update();}return;}
+    navigatorDirty_=true;if(navigatorDeferred_||!navigatorPlacement().visible){navigatorTimer_->stop();return;}navigatorTimer_->start();
+}
+void NativeCanvas::setNavigatorDeferred(bool deferred){navigatorDeferred_=deferred;if(deferred){if(navigatorTimer_)navigatorTimer_->stop();return;}if(navigatorDirty_)scheduleNavigator();}
+void NativeCanvas::noteViewportInteraction(){
+    if(!raster_)return;
+    const bool live=viewportGesture_||panning_||navigating_||dragging_;
+    if(!live)return;
+    viewportDeferred_=true;
+    if(navigatorTimer_&&navigatorTimer_->isActive())navigatorTimer_->start();
+    if(!viewportTimer_){viewportTimer_=new QTimer(this);viewportTimer_->setObjectName("viewportInteractionTimer");viewportTimer_->setSingleShot(true);connect(viewportTimer_,&QTimer::timeout,this,[this]{viewportDeferred_=false;update();});}
+    // Wheel notches coalesce. A held pan or minimap drag refreshes on a fixed
+    // cadence so newly revealed document area does not wait for the release.
+    if(viewportGesture_){viewportTimer_->setInterval(20);viewportTimer_->start();return;}
+    if(panning_||navigating_||dragging_){viewportTimer_->setInterval(40);if(!viewportTimer_->isActive())viewportTimer_->start();}
+}
+void NativeCanvas::settleViewport(){if(!viewportDeferred_)return;viewportDeferred_=false;if(viewportTimer_)viewportTimer_->stop();update();}
+void NativeCanvas::refreshNavigator(){
+    if(viewportDeferred_){if(navigatorTimer_)navigatorTimer_->start();return;}
+    if(navigatorDeferred_||!navigatorProvider||documentWidth_<=0||documentHeight_<=0)return;
+    if(!navigatorPlacement().visible){navigatorDirty_=true;return;}
+    navigatorDirty_=false;
+    const auto placement=navigatorPlacement();
+    const double longest=std::max(placement.map.width(),placement.map.height());
+    const int edge=std::clamp(int(std::ceil(std::max(32.,longest)*std::max(1.,devicePixelRatioF()))),1,256);
+    if(deferNavigatorComposite&&deferNavigatorComposite(edge))return;
+    try{presentNavigator(navigatorProvider(edge));}
+    catch(const std::exception& error){error_=error.what();update();}
+}
+void NativeCanvas::presentNavigator(CompositeViewport patch){
+    navigatorRaster_=std::move(patch.raster);navigatorOriginX_=patch.documentX;navigatorOriginY_=patch.documentY;
+    navigatorUnits_=patch.unitsPerPixel>0?patch.unitsPerPixel:1;navigatorBitmap_.Reset();update();
+}
+bool NativeCanvas::sharpPatchCoversView()const{
+    if(!raster_||rasterUnits_<=0||documentWidth_<=0||documentHeight_<=0)return false;
+    const auto frame=contentRect();const double scale=pointsPerPixel();if(scale<=0)return false;
+    const QPointF origin=documentPoint(frame.topLeft());
+    const double left=std::clamp(origin.x(),0.,double(documentWidth_)),top=std::clamp(origin.y(),0.,double(documentHeight_));
+    const double right=std::clamp(origin.x()+frame.width()/scale,0.,double(documentWidth_)),bottom=std::clamp(origin.y()+frame.height()/scale,0.,double(documentHeight_));
+    if(right<=left||bottom<=top)return true;
+    return rasterX_<=left+.51&&rasterY_<=top+.51&&rasterX_+raster_->width*rasterUnits_>=right-.51&&rasterY_+raster_->height*rasterUnits_>=bottom-.51;
+}
+void NativeCanvas::drawDocumentStandIn(D2D1_RECT_F bounds){
+    if(!context_||sharpPatchCoversView())return;
+    ensureNavigatorBitmap();
+    if(!navigatorBitmap_||!navigatorRaster_||navigatorUnits_<=0||documentWidth_<=0)return;
+    const auto& image=*navigatorRaster_;
+    const float srcL=float(std::clamp((0-navigatorOriginX_)/navigatorUnits_,0.,double(image.width)));
+    const float srcT=float(std::clamp((0-navigatorOriginY_)/navigatorUnits_,0.,double(image.height)));
+    const float srcR=float(std::clamp(documentWidth_/navigatorUnits_,0.,double(image.width)));
+    const float srcB=float(std::clamp(documentHeight_/navigatorUnits_,0.,double(image.height)));
+    if(srcR>srcL&&srcB>srcT)context_->DrawBitmap(navigatorBitmap_.Get(),bounds,1,D2D1_INTERPOLATION_MODE_LINEAR,D2D1::RectF(srcL,srcT,srcR,srcB));
+}
+void NativeCanvas::ensureNavigatorBitmap(){
+    if(!context_||!navigatorRaster_||navigatorBitmap_)return;
+    const auto& image=*navigatorRaster_;
+    if(image.width<1||image.height<1||image.width>512||image.height>512)return;
+    std::vector<Pixel> pixels(size_t(image.width)*size_t(image.height));
+    for(int y=0;y<image.height;++y)for(int x=0;x<image.width;++x)pixels[size_t(y)*size_t(image.width)+size_t(x)]=image.pixel(x,y);
+    auto properties=D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE,D2D1::PixelFormat(DXGI_FORMAT_R8G8B8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED));
+    check(context_->CreateBitmap(D2D1::SizeU(UINT32(image.width),UINT32(image.height)),pixels.data(),UINT32(image.width*4),&properties,&navigatorBitmap_),"Navigator bitmap");
+}
+void NativeCanvas::drawNavigator(){
+    const auto placement=navigatorPlacement();if(!placement.visible||!context_)return;
+    const auto map=D2D1::RectF(float(placement.map.left()),float(placement.map.top()),float(placement.map.right()),float(placement.map.bottom()));
+    ComPtr<ID2D1SolidColorBrush> shade,border,viewport;
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(.09f,.1f,.12f,.92f),&shade),"Navigator shade");
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(1,1,1,.45f),&border),"Navigator border");
+    check(context_->CreateSolidColorBrush(D2D1::ColorF(1,1,1,.95f),&viewport),"Navigator viewport");
+    context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    context_->FillRectangle(map,shade.Get());
+    ensureNavigatorBitmap();
+    if(navigatorBitmap_&&navigatorRaster_&&navigatorUnits_>0){
+        const auto& image=*navigatorRaster_;
+        const float srcL=float(std::clamp((0-navigatorOriginX_)/navigatorUnits_,0.,double(image.width)));
+        const float srcT=float(std::clamp((0-navigatorOriginY_)/navigatorUnits_,0.,double(image.height)));
+        const float srcR=float(std::clamp(documentWidth_/navigatorUnits_,0.,double(image.width)));
+        const float srcB=float(std::clamp(documentHeight_/navigatorUnits_,0.,double(image.height)));
+        if(srcR>srcL&&srcB>srcT)context_->DrawBitmap(navigatorBitmap_.Get(),map,1,D2D1_INTERPOLATION_MODE_LINEAR,D2D1::RectF(srcL,srcT,srcR,srcB));
+    }
+    context_->DrawRectangle(map,border.Get(),1);
+    if(placement.viewport.width()>0&&placement.viewport.height()>0){const auto box=D2D1::RectF(float(placement.viewport.left()),float(placement.viewport.top()),float(placement.viewport.right()),float(placement.viewport.bottom()));context_->DrawRectangle(box,viewport.Get(),1.5f);}
+    context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+}
+bool NativeCanvas::navigatorContains(QPointF position)const{const auto placement=navigatorPlacement();return placement.visible&&position.x()>=placement.map.left()&&position.y()>=placement.map.top()&&position.x()<=placement.map.right()&&position.y()<=placement.map.bottom();}
+void NativeCanvas::centerDocument(Point target){
+    if(documentWidth_<=0||documentHeight_<=0)return;
+    noteViewportInteraction();
+    auto state=viewportState();const double scale=state.pointsPerPixel();
+    target.x=std::clamp(target.x,0.,double(documentWidth_));target.y=std::clamp(target.y,0.,double(documentHeight_));
+    state.pan={(documentWidth_*.5-target.x)*scale,(documentHeight_*.5-target.y)*scale};state.followsFit=false;installViewport(state);
+}
+void NativeCanvas::navigateFrom(QPointF position){
+    const auto placement=navigatorPlacement();if(placement.map.width()<=0||placement.map.height()<=0||documentWidth_<=0)return;
+    const double x=std::clamp(position.x(),placement.map.left(),placement.map.right()),y=std::clamp(position.y(),placement.map.top(),placement.map.bottom());
+    centerDocument({(x-placement.map.left())/placement.map.width()*documentWidth_,(y-placement.map.top())/placement.map.height()*documentHeight_});
+}
+void NativeCanvas::paintEvent(QPaintEvent*){try{draw();error_.clear();}catch(const std::exception&e){error_=e.what();releaseDevice();}}
+void NativeCanvas::resizeEvent(QResizeEvent*){synchronizeViewport();if(documentWidth_>0)scheduleNavigator();if(swap_){context_->SetTarget(nullptr);target_.Reset();auto hr=swap_->ResizeBuffers(0,std::max(1,int(width()*devicePixelRatioF())),std::max(1,int(height()*devicePixelRatioF())),DXGI_FORMAT_UNKNOWN,0);try{check(hr,"Canvas resize");createTarget();}catch(const std::exception&e){error_=e.what();releaseDevice();}}update();}
+void NativeCanvas::mousePressEvent(QMouseEvent*e){
+    if(tabletActive_){e->accept();return;}
+    setFocus();last_=e->position();if(pointerHover)pointerHover(e->position(),e->modifiers());
+    if(navigatorContains(e->position())&&(e->button()==Qt::LeftButton||e->button()==Qt::RightButton)){if(e->button()==Qt::LeftButton){navigating_=true;grabMouse();navigateFrom(e->position());}e->accept();return;}
+    if(e->button()==Qt::RightButton&&rightPointerDown&&rightPointerDown(e->position(),e->modifiers())){rightDragging_=true;grabMouse();e->accept();return;}
+    if(e->button()==Qt::MiddleButton){panning_=true;grabMouse();e->accept();return;}
+    if(e->button()==Qt::LeftButton&&!rightDragging_&&!panning_){if(beginGuideDrag(e->position())){grabMouse();e->accept();return;}dragging_=true;grabMouse();if(pointerDown)pointerDown(documentPoint(e->position()),e->modifiers());}
+}
+void NativeCanvas::mouseMoveEvent(QMouseEvent*e){
+    if(tabletActive_){e->accept();return;}
+    if(guideDrag_){updateGuideDrag(e->position());last_=e->position();return;}
+    if(pointerHover)pointerHover(e->position(),e->modifiers());
+    if(navigating_){navigateFrom(e->position());last_=e->position();return;}
+    if(rightDragging_){if(rightPointerMove)rightPointerMove(e->position(),e->modifiers(),false);last_=e->position();return;}
+    if(!dragging_&&navigatorContains(e->position()))setCursor(Qt::OpenHandCursor);
+    else if(!dragging_&&rulerBandAt(e->position())==RulerBand::Horizontal)setCursor(Qt::SizeVerCursor);
+    else if(!dragging_&&rulerBandAt(e->position())==RulerBand::Vertical)setCursor(Qt::SizeHorCursor);
+    else if(!dragging_){
+        if(const auto guide=guideIndexAt(e->position()))setCursor(guides[size_t(*guide)].first?Qt::SizeVerCursor:Qt::SizeHorCursor);
+        else if(cropOverlay_){
+            const auto hit=cropResizeHandle(*cropOverlay_,{e->position().x(),e->position().y()},viewMapping());
+            if(hit){constexpr Qt::CursorShape cursors[]{Qt::SizeFDiagCursor,Qt::SizeVerCursor,Qt::SizeBDiagCursor,Qt::SizeHorCursor,Qt::SizeFDiagCursor,Qt::SizeVerCursor,Qt::SizeBDiagCursor,Qt::SizeHorCursor};setCursor(cursors[*hit]);}
+            else unsetCursor();
+        }
+    }
+    if(!dragging_&&!navigatorContains(e->position())&&rulerBandAt(e->position())==RulerBand::None&&!guideIndexAt(e->position())&&(transformOverlay_||distortionOverlay_)){auto geometry=distortionOverlay_?editing_transform::OverlayGeometry::fromCorners(*distortionOverlay_,viewMapping()):editing_transform::OverlayGeometry::fromTransform(*transformOverlay_,viewMapping());auto mode=geometry.hit({e->position().x(),e->position().y()});auto cursor=mode?geometry.cursor(*mode,{e->modifiers().testFlag(Qt::ShiftModifier),e->modifiers().testFlag(Qt::AltModifier),e->modifiers().testFlag(Qt::ControlModifier),false},distortionOverlay_.has_value()):editing_transform::Cursor::Move;Qt::CursorShape shape=Qt::SizeAllCursor;switch(cursor){case editing_transform::Cursor::Horizontal:shape=Qt::SizeHorCursor;break;case editing_transform::Cursor::Vertical:shape=Qt::SizeVerCursor;break;case editing_transform::Cursor::DiagonalDown:shape=Qt::SizeFDiagCursor;break;case editing_transform::Cursor::DiagonalUp:shape=Qt::SizeBDiagCursor;break;case editing_transform::Cursor::Rotate:case editing_transform::Cursor::Distort:shape=Qt::CrossCursor;break;default:break;}setCursor(shape);}
+    if(panning_&&(!navigationAllowed||navigationAllowed()))panBy(e->position()-last_);else if(dragging_&&pointerMove)pointerMove(documentPoint(e->position()),e->modifiers());last_=e->position();
+}
+void NativeCanvas::mouseDoubleClickEvent(QMouseEvent* e){
+    if(tabletActive_||e->button()!=Qt::LeftButton||rightDragging_){e->accept();return;}
+    if(navigatorContains(e->position())){navigating_=true;grabMouse();navigateFrom(e->position());e->accept();return;}
+    if(guideDrag_){e->accept();return;}
+    if(beginGuideDrag(e->position())){grabMouse();e->accept();return;}
+    setFocus();last_=e->position();if(pointerHover)pointerHover(e->position(),e->modifiers());
+    dragging_=true;grabMouse();if(pointerDoubleClick)pointerDoubleClick(documentPoint(e->position()),e->modifiers());else if(pointerDown)pointerDown(documentPoint(e->position()),e->modifiers());
+}
+void NativeCanvas::mouseReleaseEvent(QMouseEvent*e){
+    if(tabletActive_){e->accept();return;}
+    if(navigating_&&e->button()==Qt::LeftButton){navigating_=false;releaseMouse();settleViewport();return;}
+    if(panning_&&e->button()==Qt::MiddleButton){panning_=false;releaseMouse();settleViewport();return;}
+    if(rightDragging_&&e->button()==Qt::RightButton){rightDragging_=false;releaseMouse();if(rightPointerMove)rightPointerMove(e->position(),e->modifiers(),true);settleViewport();return;}
+    if(guideDrag_&&e->button()==Qt::LeftButton){finishGuideDrag(e->position());return;}
+    if(dragging_&&e->button()==Qt::LeftButton){dragging_=false;releaseMouse();if(pointerUp)pointerUp(documentPoint(e->position()),e->modifiers());settleViewport();}
+}
+void NativeCanvas::wheelEvent(QWheelEvent*e){
+    e->accept();if(documentWidth_<=0||documentHeight_<=0||(navigationAllowed&&!navigationAllowed()))return;
+    // Qt reports discrete wheel angle in eighths of degrees (120 per detent).
+    // One normalized detent is one source non-precise scrolling unit.
+    // Forward (positive) zooms in and backward zooms out, with Alt only.
+    // Ctrl+wheel pans. That replaces the previous Ctrl+wheel zoom on request.
+    // Windows leaves Alt out of WM_MOUSEWHEEL, and some devices report that
+    // notch on the horizontal axis. The live key state still has Alt.
+    // One detent multiplies zoom by 5/4. Precise pixel scrolling stays gradual.
+    const auto modifiers=e->modifiers()|QGuiApplication::keyboardModifiers();
+    const bool precise=!e->pixelDelta().isNull();const QPointF angleSteps=QPointF(e->angleDelta())/120;
+    const bool notch=!precise||std::abs(angleSteps.x())>=1||std::abs(angleSteps.y())>=1;
+    const QPointF delta=notch?angleSteps:QPointF(e->pixelDelta());
+    viewportGesture_=true;
+    if(modifiers.testFlag(Qt::AltModifier)){const double steps=std::abs(delta.y())>=std::abs(delta.x())?delta.y():delta.x();zoomAt(zoom*std::exp(steps*(notch?std::log(1.25):.015)),e->position());}
+    else panBy((precise?QPointF(e->pixelDelta()):angleSteps)*(precise?1:12));
+    viewportGesture_=false;
+    if(pointerHover)pointerHover(e->position(),e->modifiers());
+}
+void NativeCanvas::setTextOverlay(std::optional<TextCaretOverlay> value){textOverlay_=std::move(value);setAttribute(Qt::WA_InputMethodEnabled,textOverlay_.has_value());if(!textOverlay_){textBitmap_.Reset();textRasterSource_.reset();}update();}
+void NativeCanvas::drawTextOverlay(bool pixelsOnly,bool decorationsOnly){
+    if(!textOverlay_||!context_||!factory_||documentWidth_<=0)return;
+    const auto& overlay=*textOverlay_;const auto mapping=viewMapping();
+    auto viewOf=[&](double x,double y){auto point=mapping.toView({x,y});return D2D1::Point2F(float(point.x),float(point.y));};
+    ComPtr<ID2D1SolidColorBrush> fill,caret;    check(context_->CreateSolidColorBrush(D2D1::ColorF(0.2f,0.55f,1.f,0.45f),&fill),"Text selection");check(context_->CreateSolidColorBrush(D2D1::ColorF(0.15f,0.45f,1.f),&caret),"Text caret");
+    context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    if(!decorationsOnly&&overlay.raster&&overlay.raster->width>0&&overlay.raster->height>0&&overlay.raster->width<=30000&&overlay.raster->height<=30000){
+        if(textRasterSource_!=overlay.raster||!textBitmap_){
+            const auto& image=*overlay.raster;std::vector<Pixel> pixels(size_t(image.width)*image.height);
+            for(int y=0;y<image.height;++y)for(int x=0;x<image.width;++x)pixels[size_t(y)*image.width+x]=image.pixel(x,y);
+            auto properties=D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE,D2D1::PixelFormat(DXGI_FORMAT_R8G8B8A8_UNORM,D2D1_ALPHA_MODE_PREMULTIPLIED));
+            textBitmap_.Reset();check(context_->CreateBitmap(D2D1::SizeU(UINT32(image.width),UINT32(image.height)),pixels.data(),UINT32(image.width*4),&properties,&textBitmap_),"Text overlay bitmap");textRasterSource_=overlay.raster;
+        }
+        const auto origin=viewOf(overlay.originX,overlay.originY),opposite=viewOf(overlay.originX+overlay.width,overlay.originY+overlay.height);
+        context_->DrawBitmap(textBitmap_.Get(),D2D1::RectF(origin.x,origin.y,opposite.x,opposite.y),1,D2D1_INTERPOLATION_MODE_LINEAR);
+    }
+    if(pixelsOnly){context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);return;}
+    for(const auto& quad:overlay.selection){
+        ComPtr<ID2D1PathGeometry> path;check(factory_->CreatePathGeometry(&path),"Text selection");
+        ComPtr<ID2D1GeometrySink> sink;check(path->Open(&sink),"Text selection");
+        sink->BeginFigure(viewOf(quad.x0,quad.y0),D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddLine(viewOf(quad.x1,quad.y1));sink->AddLine(viewOf(quad.x2,quad.y2));sink->AddLine(viewOf(quad.x3,quad.y3));
+        sink->EndFigure(D2D1_FIGURE_END_CLOSED);check(sink->Close(),"Text selection");
+        context_->FillGeometry(path.Get(),fill.Get());
+    }
+    if(overlay.showFrame){for(int i=0;i<4;++i){const auto& a=overlay.frame[size_t(i)];const auto& b=overlay.frame[size_t((i+1)%4)];context_->DrawLine(viewOf(a.x,a.y),viewOf(b.x,b.y),caret.Get(),std::max(1.f,float(pointsPerPixel())));}for(const auto& handle:overlay.handles){const auto center=viewOf(handle.x,handle.y);context_->FillRectangle(D2D1::RectF(center.x-4,center.y-4,center.x+4,center.y+4),caret.Get());}}
+    if(overlay.caret>=0&&overlay.caret<int(overlay.carets.size())){const auto& line=overlay.carets[size_t(overlay.caret)];context_->DrawLine(viewOf(line.x0,line.y0),viewOf(line.x1,line.y1),caret.Get(),std::max(1.f,float(pointsPerPixel())));}
+    context_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+}
+void NativeCanvas::keyPressEvent(QKeyEvent*e){if(e->key()==Qt::Key_Escape&&guideDrag_){cancelGuideDrag();e->accept();return;}if(textKey&&textKey(e)){e->accept();return;}if(e->key()==Qt::Key_Escape&&navigating_){navigating_=false;if(QWidget::mouseGrabber()==this)releaseMouse();e->accept();return;}if(e->key()==Qt::Key_Escape&&(dragging_||rightDragging_)){dragging_=rightDragging_=tabletActive_=false;releaseMouse();if(pointerCancel)pointerCancel();e->accept();}else QWidget::keyPressEvent(e);}
+void NativeCanvas::inputMethodEvent(QInputMethodEvent*e){if(textInput){textInput(e);e->accept();return;}QWidget::inputMethodEvent(e);}
+QVariant NativeCanvas::inputMethodQuery(Qt::InputMethodQuery query) const{
+    if(query==Qt::ImEnabled)return textOverlay_.has_value();
+    if(textOverlay_&&query==Qt::ImCursorRectangle&&textOverlay_->caret>=0&&textOverlay_->caret<int(textOverlay_->carets.size())){
+        const auto& line=textOverlay_->carets[size_t(textOverlay_->caret)];const auto mapping=viewMapping();
+        const auto a=mapping.toView({line.x0,line.y0}),b=mapping.toView({line.x1,line.y1});
+        return QRect(QPoint(int(std::min(a.x,b.x)),int(std::min(a.y,b.y))),QPoint(int(std::max(a.x,b.x))+1,int(std::max(a.y,b.y))+1));
+    }
+    return QWidget::inputMethodQuery(query);
+}
+void NativeCanvas::tabletEvent(QTabletEvent*e){
+    e->accept();
+    if(e->type()==QEvent::TabletMove&&guideDrag_){updateGuideDrag(e->position());return;}
+    if(e->type()==QEvent::TabletRelease&&guideDrag_){finishGuideDrag(e->position());return;}
+    if(pointerHover)pointerHover(e->position(),e->modifiers());
+    const auto pressure=e->pointingDevice()->capabilities().testFlag(QInputDevice::Capability::Pressure)
+        ? std::optional<double>(e->pressure()) : std::nullopt;
+    // Accept tablet events so Qt does not synthesize a second mouse gesture.
+    if(e->type()==QEvent::TabletPress){
+        setFocus();
+        if(dragging_||rightDragging_||panning_||navigating_)return;
+        if(beginGuideDrag(e->position())){grabMouse();return;}
+        if(navigatorContains(e->position())){navigating_=true;grabMouse();navigateFrom(e->position());return;}
+        tabletActive_=dragging_=true;
+        tabletPressure_=pressure;
+        grabMouse();
+        if(pointerDown)pointerDown({documentPoint(e->position()),tabletPressure_},e->modifiers());
+    }else if(e->type()==QEvent::TabletMove){
+        if(navigating_)navigateFrom(e->position());
+        else if(tabletActive_){
+            tabletPressure_=pressure;
+            if(pointerMove)pointerMove({documentPoint(e->position()),tabletPressure_},e->modifiers());
+        }
+    }else if(e->type()==QEvent::TabletRelease&&navigating_){
+        navigating_=false;
+        releaseMouse();
+    }else if(e->type()==QEvent::TabletRelease&&tabletActive_){
+        tabletActive_=dragging_=false;
+        const auto lastPressure=tabletPressure_;
+        tabletPressure_.reset();
+        releaseMouse();
+        // Qt release pressure describes lift-off. Use the last contact sample at the final position.
+        if(pointerUp)pointerUp({documentPoint(e->position()),lastPressure},e->modifiers());
+    }
+}
+void NativeCanvas::leaveEvent(QEvent*e){if(pointerLeave)pointerLeave();if(!dragging_&&!rightDragging_)unsetCursor();QWidget::leaveEvent(e);}
+bool NativeCanvas::event(QEvent*e){if(e->type()==QEvent::Show){watchPresentationWindow();refreshDisplayProfile();updateSelectionAnimation();}
+    if(e->type()==QEvent::Hide&&selectionTimer_)selectionTimer_->stop();
+    const bool focusLost=e->type()==QEvent::WindowDeactivate||e->type()==QEvent::FocusOut;
+    if(guideDrag_&&(focusLost||e->type()==QEvent::UngrabMouse))cancelGuideDrag();
+    if(navigating_&&(focusLost||e->type()==QEvent::UngrabMouse)){navigating_=false;if(QWidget::mouseGrabber()==this&&!dragging_&&!rightDragging_)releaseMouse();}
+    if(focusLost||(e->type()==QEvent::UngrabMouse&&(dragging_||rightDragging_))){setSnapGuides();dragging_=rightDragging_=tabletActive_=false;tabletPressure_.reset();if(QWidget::mouseGrabber()==this)releaseMouse();if(pointerInterrupted)pointerInterrupted();else if(pointerCancel)pointerCancel();}
+    if(e->type()==QEvent::DevicePixelRatioChange){releaseDevice();synchronizeViewport();}
+    if(e->type()==QEvent::NativeGesture){auto*gesture=static_cast<QNativeGestureEvent*>(e);if(gesture->gestureType()==Qt::ZoomNativeGesture){if(documentWidth_>0&&(!navigationAllowed||navigationAllowed()))zoomAt(zoom*(1+gesture->value()),gesture->position());gesture->accept();return true;}}
+    return QWidget::event(e);
+}
+}
+
+
+

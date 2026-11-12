@@ -1,0 +1,56 @@
+#pragma once
+#include "core/Document.h"
+#include "ui/RawImportDialog.h"
+#include <QObject>
+#include <QPointer>
+#include <QStringList>
+#include <functional>
+#include <memory>
+
+namespace compositor::ui {
+struct WorkspaceDropRequest {
+    QStringList paths;
+    QPointer<QObject> destination;
+    bool hasDestination{};
+    std::optional<Point> point;
+    std::shared_ptr<void> lifetime;
+    // Runs once after this request settles; owner destruction discards it.
+    // Individual provider errors can be reported after readable images import.
+    std::function<void(bool cancelled)> completed;
+};
+// ProjectWorkspace.receive: wait before taking the workspace, then await every
+// image URL before processing the next item. All host calls run on the UI thread.
+class WorkspaceDropQueue final:public QObject {
+public:
+    struct Host {
+        std::function<bool()> canBegin;
+        std::function<bool()> canAdvance;
+        std::function<void(bool)> managing;
+        std::function<void(const QString&)> project;
+        // Runs before imageTarget so a cancelled review does not create a destination tab.
+        std::function<bool(const QString&,RawSettings&)> review;
+        std::function<QObject*(QObject*,bool)> imageTarget;
+        std::function<void(QObject*,const QString&,std::optional<Point>,std::shared_ptr<void>,const RawSettings&)> image;
+        std::function<void(QObject*)> cancelImage;
+        std::function<void(const QString&,const QString&)> error;
+        // A standalone document import runs before creating an image destination. false means Cancel.
+        std::function<std::optional<bool>(const QString&,const RawSettings&)> standalone;
+        std::function<bool(const QStringList&,RawSettings&)> reviewBatch;
+        // Destination-aware preflight runs without selecting or creating a tab.
+        std::function<bool(const QString&,QObject*,bool)> prepareImage;
+    };
+    explicit WorkspaceDropQueue(Host,QObject* parent=nullptr);
+    ~WorkspaceDropQueue() override;
+    void enqueue(WorkspaceDropRequest);
+    void imageFinished(QObject*,bool cancelled);
+    void cancel(QObject* destination=nullptr);
+    bool idle()const;
+    bool waitingFor(QObject*)const;
+    static WorkspaceDropQueue* find(QObject* parent);
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+    void drain();
+    void finish();
+};
+}

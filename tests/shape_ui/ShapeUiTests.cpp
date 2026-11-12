@@ -1,0 +1,118 @@
+#include "ui/MainWindow.h"
+#include <QApplication>
+#include <QKeyEvent>
+#include <cmath>
+#include <iostream>
+#include <map>
+#include <stdexcept>
+using namespace compositor;
+#define REQUIRE(...) do{if(!(__VA_ARGS__))throw std::runtime_error(std::string("line ")+std::to_string(__LINE__)+": " #__VA_ARGS__);}while(false)
+Document fixture(){Document d;d.id="shape-witness";d.width=100;d.height=80;for(const char* id:{"bottom","middle","top"}){Layer l;l.id=id;l.name=id;l.transform={0,0,8,8};l.raster=Raster::filled(8,8,{50,60,70,255});d.layers.push_back(l);}return d;}
+void shapeTool(MainWindow& w){for(auto* action:w.findChildren<QAction*>())if(action->text()=="Shape (U)"){action->trigger();return;}throw std::runtime_error("Shape tool absent");}
+QDoubleSpinBox* radius(MainWindow&w){for(auto* value:w.findChildren<QDoubleSpinBox*>())if(value->accessibleName()=="Corner radius")return value;throw std::runtime_error("Shape radius absent");}
+QComboBox* kind(MainWindow&w){auto* value=w.findChild<QComboBox*>("shapeKind");REQUIRE(value);return value;}
+void down(EditorProject&p,Point at){p.canvas->pointerDown({at.x,at.y},{});}
+void move(EditorProject&p,Point at,Qt::KeyboardModifiers flags={}){p.canvas->pointerMove({at.x,at.y},flags);}
+void up(EditorProject&p,Point at,Qt::KeyboardModifiers flags={}){p.canvas->pointerUp({at.x,at.y},flags);}
+void draw(EditorProject&p,Point start={10,12},Point end={20,24},Qt::KeyboardModifiers flags={}){down(p,start);move(p,end,flags);up(p,end,flags);}
+const Layer& added(const EditorProject&p){auto it=std::find_if(p.document->layers.begin(),p.document->layers.end(),[&](const Layer& l){return l.id==p.active;});REQUIRE(it!=p.document->layers.end()&&!it->shapeJson.empty());return *it;}
+void shape_insert_sibling(){MainWindow w(true);auto d=fixture();auto&p=w.addProject(d);p.active="middle";p.selected={p.active};shapeTool(w);draw(p);REQUIRE(p.document->layers.size()==4);REQUIRE(p.document->layers[2].id==p.active&&added(p).parentId.empty());REQUIRE(p.document->layers[3].id=="top");}
+void shape_insert_folder(){MainWindow w(true);auto d=fixture();d.layers[0].raster.reset();d.layers[0].group=true;d.layers[1].parentId="bottom";auto&p=w.addProject(d);p.active="bottom";p.selected={p.active};p.collapsedGroups.insert("bottom");shapeTool(w);draw(p);REQUIRE(p.document->layers.size()==4);REQUIRE(p.document->layers[1].id==p.active&&added(p).parentId=="bottom");REQUIRE(p.document->layers[2].id=="middle"&&p.collapsedGroups.contains("bottom"));}
+void shape_insert_nested_child(){MainWindow w(true);auto d=fixture();d.layers[0].raster.reset();d.layers[0].group=true;d.layers[1].parentId="bottom";auto&p=w.addProject(d);p.active="middle";p.selected={p.active};shapeTool(w);draw(p);REQUIRE(p.document->layers[2].id==p.active&&added(p).parentId=="bottom"&&p.document->layers[3].id=="top");}
+void shape_fractional_anchor(){MainWindow w(true);auto&p=w.addProject(fixture());shapeTool(w);draw(p,{10.6,12.4},{20.2,22.6});REQUIRE(added(p).transform==Transform{11,12,9,11});REQUIRE(added(p).raster->width==9&&added(p).raster->height==11);}
+void shape_center_square(){MainWindow w(true);auto&p=w.addProject(fixture());shapeTool(w);draw(p,{-10.6,12.4},{-4.2,16.4},Qt::ShiftModifier|Qt::AltModifier);REQUIRE(added(p).transform==Transform{-18,5,14,14});}
+void shape_kind_change_cancels(){MainWindow w(true);auto d=fixture();auto&p=w.addProject(d);shapeTool(w);down(p,{10,12});move(p,{20,24});kind(w)->setCurrentIndex(1);up(p,{20,24});REQUIRE(p.document==d&&p.history.undoCount()==0);draw(p);REQUIRE(editing::decodeShapeStyle(added(p).shapeJson).kind==editing::ShapeKind::Ellipse);}
+void shape_radius_limit(){MainWindow w(true);auto&p=w.addProject(fixture());shapeTool(w);REQUIRE(radius(w)->minimum()==0&&radius(w)->maximum()==5000);radius(w)->setValue(9000);REQUIRE(radius(w)->value()==5000);draw(p);REQUIRE(editing::decodeShapeStyle(added(p).shapeJson).cornerRadius==5000);}
+void shape_radius_frozen(){MainWindow w(true);auto&p=w.addProject(fixture());shapeTool(w);radius(w)->setValue(3);down(p,{10,12});move(p,{20,24});radius(w)->setValue(8);up(p,{20,24});REQUIRE(editing::decodeShapeStyle(added(p).shapeJson).cornerRadius==3);REQUIRE(radius(w)->value()==8);}
+void shape_draft_immutable(){MainWindow w(true);auto d=fixture();auto&p=w.addProject(d);const auto active=p.active;shapeTool(w);down(p,{10,12});move(p,{20,24});REQUIRE(p.document==d&&p.active==active&&p.history.undoCount()==0);p.canvas->pointerCancel();REQUIRE(p.document==d&&p.active==active&&p.history.undoCount()==0);}
+void shape_click_noop(){MainWindow w(true);auto d=fixture();auto&p=w.addProject(d);shapeTool(w);down(p,{10.6,12.4});up(p,{10.6,12.4});REQUIRE(p.document==d&&p.history.undoCount()==0);}
+void shape_history_selection(){MainWindow w(true);auto d=fixture();d.selection=editing::rasterSelection(editing::SelectionOutline::rectangle({1,2,3,4},false),100,80);d.layers.back().mask=Mask{std::make_shared<GrayRaster>(GrayRaster{1,1,{255}})};auto&p=w.addProject(d);p.maskSelected=true;shapeTool(w);draw(p);REQUIRE(p.document->selection==d.selection&&!p.maskSelected);REQUIRE(p.history.undoCount()==1&&p.history.undoName()=="Rectangle");auto snapshot=p.history.undo();REQUIRE(snapshot&&snapshot->document==d);}
+void shape_stroke_draw(){MainWindow w(true);auto&p=w.addProject(fixture());shapeTool(w);auto*checkbox=w.findChild<QCheckBox*>("shapeStroke");REQUIRE(checkbox);checkbox->setChecked(true);w.findChild<QDoubleSpinBox*>("shapeStrokeWidth")->setValue(3);draw(p);const auto style=editing::decodeShapeStyle(added(p).shapeJson);REQUIRE(style.strokeEnabled&&style.strokeWidth==3);REQUIRE(added(p).raster->pixel(0,0).a==255);kind(w)->setCurrentIndex(2);draw(p,{30,30},{40,40});REQUIRE(!editing::decodeShapeStyle(added(p).shapeJson).strokeEnabled);}
+void shape_style_loads_from_selected_layer(){MainWindow w(true);auto d=fixture();editing::ShapeStyle style{editing::ShapeKind::Rectangle,0,0,0,0};style.strokeEnabled=true;style.strokeWidth=3;d.layers.push_back(*editing::createShapeLayer({10,10,20,20},style,"Stroked"));auto&p=w.addProject(d);p.active=d.layers.back().id;p.selected={p.active};shapeTool(w);REQUIRE(w.findChild<QCheckBox*>("shapeStroke")->isChecked());REQUIRE(w.findChild<QDoubleSpinBox*>("shapeStrokeWidth")->value()==3);}
+void shape_controls_edit_selected_layer(){MainWindow w(true);auto&p=w.addProject(fixture());shapeTool(w);draw(p);const auto id=p.active;const auto fill=editing::decodeShapeStyle(added(p).shapeJson);w.findChild<QCheckBox*>("shapeStroke")->setChecked(true);w.findChild<QDoubleSpinBox*>("shapeStrokeWidth")->setValue(3);const auto style=editing::decodeShapeStyle(added(p).shapeJson);REQUIRE(p.active==id&&style.strokeEnabled&&style.strokeWidth==3);REQUIRE(style.red==fill.red&&style.green==fill.green&&style.blue==fill.blue);REQUIRE(p.history.undoName()=="Shape Style");}
+QAction* command(MainWindow&w,const char*id){for(auto*action:w.findChildren<QAction*>())if(action->property("commandId").toString()==id)return action;throw std::runtime_error(std::string("missing registered command ")+id);}
+void shape_undo_resyncs_bar(){MainWindow w(true);auto&p=w.addProject(fixture());shapeTool(w);draw(p);auto*stroke=w.findChild<QCheckBox*>("shapeStroke");auto*width=w.findChild<QDoubleSpinBox*>("shapeStrokeWidth");stroke->setChecked(true);REQUIRE(editing::decodeShapeStyle(added(p).shapeJson).strokeEnabled);command(w,"edit.undo")->trigger();REQUIRE(!editing::decodeShapeStyle(added(p).shapeJson).strokeEnabled&&!stroke->isChecked());width->setValue(4);REQUIRE(!editing::decodeShapeStyle(added(p).shapeJson).strokeEnabled);}
+void shape_smoothing_draft(){
+    MainWindow w(true);
+    auto d=fixture();
+    auto& p=w.addProject(d);
+    shapeTool(w);
+    auto* smoothing=w.findChild<QCheckBox*>("shapeSmoothing");
+    REQUIRE(smoothing&&!smoothing->isChecked()&&!smoothing->isHidden());
+    kind(w)->setCurrentIndex(1);
+    REQUIRE(smoothing->isHidden());
+    kind(w)->setCurrentIndex(2);
+    REQUIRE(smoothing->isHidden());
+    kind(w)->setCurrentIndex(0);
+    REQUIRE(!smoothing->isHidden());
+    radius(w)->setValue(15);
+    smoothing->setChecked(true);
+
+    down(p,{10,12});
+    move(p,{90,72});
+    REQUIRE(p.canvas->shapeDraft()&&p.canvas->shapeDraft()->style.smoothing);
+    p.canvas->pointerCancel();
+    REQUIRE(!p.canvas->shapeDraft()&&p.document==d&&p.history.undoCount()==0);
+
+    down(p,{10,12});
+    move(p,{90,72});
+    smoothing->setChecked(false);
+    REQUIRE(p.canvas->shapeDraft()&&p.canvas->shapeDraft()->style.smoothing);
+    up(p,{90,72});
+    REQUIRE(!p.canvas->shapeDraft()&&p.history.undoCount()==1);
+    const auto style=editing::decodeShapeStyle(added(p).shapeJson);
+    REQUIRE(style.smoothing&&style.cornerRadius==15);
+    auto ordinary=style;
+    ordinary.smoothing=false;
+    REQUIRE(added(p).raster->rgba()!=editing::shapeRaster(ordinary,80,60)->rgba());
+    REQUIRE(smoothing->isChecked());
+
+    radius(w)->setValue(20);
+    emit radius(w)->editingFinished();
+    auto resizedCorners=style;
+    resizedCorners.cornerRadius=20;
+    REQUIRE(editing::decodeShapeStyle(added(p).shapeJson)==resizedCorners&&smoothing->isChecked());
+    REQUIRE(p.history.undoCount()==2&&p.history.undoName()=="Shape Style");
+
+    down(p,{14,16});
+    move(p,{86,68});
+    REQUIRE(p.canvas->shapeDraft()&&!p.canvas->shapeDraft()->style.smoothing);
+    p.canvas->pointerCancel();
+    REQUIRE(smoothing->isChecked()&&p.history.undoCount()==2);
+    draw(p,{14,16},{86,68});
+    REQUIRE(!editing::decodeShapeStyle(added(p).shapeJson).smoothing&&!smoothing->isChecked());
+}
+void shape_smoothing_history(){
+    MainWindow w(true);
+    auto& p=w.addProject(fixture());
+    shapeTool(w);
+    radius(w)->setValue(15);
+    draw(p,{10,12},{90,72});
+    const auto ordinary=added(p);
+    auto* smoothing=w.findChild<QCheckBox*>("shapeSmoothing");
+    REQUIRE(smoothing&&!smoothing->isChecked());
+    smoothing->setChecked(true);
+    const auto smoothed=added(p);
+    REQUIRE(p.history.undoCount()==2&&p.history.undoName()=="Shape Style");
+    REQUIRE(smoothed.id==ordinary.id&&smoothed.raster->rgba()!=ordinary.raster->rgba());
+    REQUIRE(editing::decodeShapeStyle(smoothed.shapeJson).smoothing);
+    command(w,"edit.undo")->trigger();
+    REQUIRE(added(p)==ordinary&&!smoothing->isChecked());
+    command(w,"edit.redo")->trigger();
+    REQUIRE(added(p)==smoothed&&smoothing->isChecked());
+    kind(w)->setCurrentIndex(1);
+    REQUIRE(smoothing->isHidden()&&!editing::decodeShapeStyle(added(p).shapeJson).smoothing);
+    command(w,"edit.undo")->trigger();
+    REQUIRE(added(p)==smoothed&&!smoothing->isHidden()&&smoothing->isChecked());
+}
+void shape_width_steps_coalesce(){MainWindow w(true);auto&p=w.addProject(fixture());shapeTool(w);draw(p);const auto base=p.history.undoCount();w.findChild<QCheckBox*>("shapeStroke")->setChecked(true);auto*width=w.findChild<QDoubleSpinBox*>("shapeStrokeWidth");const auto before=editing::decodeShapeStyle(added(p).shapeJson).strokeWidth;width->setValue(3);width->setValue(4);width->setValue(5);REQUIRE(p.history.undoCount()==base+1);emit width->editingFinished();REQUIRE(p.history.undoCount()==base+2&&p.history.undoName()=="Shape Style");REQUIRE(editing::decodeShapeStyle(added(p).shapeJson).strokeWidth==5);command(w,"edit.undo")->trigger();REQUIRE(editing::decodeShapeStyle(added(p).shapeJson).strokeWidth==before&&editing::decodeShapeStyle(added(p).shapeJson).strokeEnabled);}
+void shape_line_controls(){
+    MainWindow w(true);auto& p=w.addProject(fixture());shapeTool(w);kind(w)->setCurrentIndex(2);
+    auto* style=w.findChild<QComboBox*>("shapeLineStyle");auto* cap=w.findChild<QComboBox*>("shapeLineCap");auto* width=w.findChild<QDoubleSpinBox*>("shapeLineWidth");REQUIRE(style&&cap&&width);
+    style->setCurrentIndex(1);cap->setCurrentIndex(1);width->setValue(6);emit width->editingFinished();
+    const auto before=*p.document;down(p,{10,30});move(p,{80,30});REQUIRE(p.canvas->shapeDraft());p.canvas->pointerCancel();REQUIRE(!p.canvas->shapeDraft()&&*p.document==before&&p.history.undoCount()==0);
+    draw(p,{10,30},{80,30});const auto line=added(p);const auto settings=editing::decodeShapeStyle(line.shapeJson);REQUIRE(settings.lineStyle==editing::ShapeLineStyle::Dashed&&settings.lineCap==editing::ShapeLineCap::Square&&settings.lineWidth==6);REQUIRE(p.history.undoCount()==1);
+    style->setCurrentIndex(5);REQUIRE(editing::decodeShapeStyle(added(p).shapeJson).lineStyle==editing::ShapeLineStyle::Dotted&&p.history.undoCount()==2);command(w,"edit.undo")->trigger();REQUIRE(added(p)==line&&style->currentIndex()==1);command(w,"edit.redo")->trigger();REQUIRE(style->currentIndex()==5);
+    const auto prior=added(p);const auto priorStyle=editing::decodeShapeStyle(prior.shapeJson);auto endpoint=[](const Layer& l,const editing::ShapeStyle& s){return l.transform.fromUnit({s.startX*(l.raster->width-1)/l.raster->width,s.startY*(l.raster->height-1)/l.raster->height});};const auto start=endpoint(prior,priorStyle);width->setValue(30);emit width->editingFinished();const auto changed=added(p);const auto changedStyle=editing::decodeShapeStyle(changed.shapeJson);const auto moved=endpoint(changed,changedStyle);REQUIRE(std::hypot(start.x-moved.x,start.y-moved.y)<.001);command(w,"edit.undo")->trigger();REQUIRE(added(p)==prior);
+}
+int main(int argc,char**argv){QApplication app(argc,argv);std::map<std::string,void(*)()>tests{{"shape_controls_edit_selected_layer",shape_controls_edit_selected_layer},{"shape_style_loads_from_selected_layer",shape_style_loads_from_selected_layer},{"shape_stroke_draw",shape_stroke_draw},{"shape_line_controls",shape_line_controls},{"shape_insert_sibling",shape_insert_sibling},{"shape_insert_folder",shape_insert_folder},{"shape_insert_nested_child",shape_insert_nested_child},{"shape_fractional_anchor",shape_fractional_anchor},{"shape_center_square",shape_center_square},{"shape_kind_change_cancels",shape_kind_change_cancels},{"shape_radius_limit",shape_radius_limit},{"shape_radius_frozen",shape_radius_frozen},{"shape_draft_immutable",shape_draft_immutable},{"shape_click_noop",shape_click_noop},{"shape_history_selection",shape_history_selection},{"shape_undo_resyncs_bar",shape_undo_resyncs_bar},{"shape_width_steps_coalesce",shape_width_steps_coalesce},{"shape_smoothing_draft",shape_smoothing_draft},{"shape_smoothing_history",shape_smoothing_history}};int failed=0,passed=0;for(const auto&[name,test]:tests){if(argc>1&&argv[1]!=name)continue;try{test();++passed;std::cout<<"PASS "<<name<<'\n';}catch(const std::exception&e){++failed;std::cout<<"FAIL "<<name<<": "<<e.what()<<'\n';}}if(argc>1&&!tests.contains(argv[1]))return 2;std::cout<<"RESULT passed="<<passed<<" failed="<<failed<<'\n';return failed?1:0;}

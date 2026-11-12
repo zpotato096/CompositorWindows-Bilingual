@@ -1,0 +1,28 @@
+#include <windows.h>
+#include "CompositorVersion.h"
+IDI_ICON1 ICON "../assets/app.ico"
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION COMPOSITOR_VERSION_MAJOR,COMPOSITOR_VERSION_MINOR,COMPOSITOR_VERSION_PATCH,0
+ PRODUCTVERSION COMPOSITOR_VERSION_MAJOR,COMPOSITOR_VERSION_MINOR,COMPOSITOR_VERSION_PATCH,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904B0"
+  BEGIN
+   VALUE "CompanyName", "Compositor Windows contributors"
+   VALUE "FileDescription", "Compositor Windows"
+   VALUE "FileVersion", COMPOSITOR_VERSION_STRING
+   VALUE "ProductName", "Compositor Windows"
+   VALUE "ProductVersion", COMPOSITOR_VERSION_STRING
+   VALUE "LegalCopyright", "Original Compositor: Wonder Assembly LLC. Windows port: contributors. MIT."
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x409, 1200
+ END
+END
